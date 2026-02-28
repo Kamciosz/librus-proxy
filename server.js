@@ -9,213 +9,234 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3001;
 
-// Helper: execute HTTPS request with cookies
-function httpsRequest(options, body, cookies) {
+// Nagłówki wymagane przez api.librus.pl (PR #81 librus-api: Referer jest OBOWIĄZKOWY)
+const BASE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "pl,en-US;q=0.7,en;q=0.3",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1"
+};
+
+// Helper: HTTPS request z obsługą ciasteczek i Referer
+function httpsRequest(options, body, cookies, referer) {
     return new Promise((resolve, reject) => {
         const cookieStr = Object.entries(cookies || {})
             .map(([k, v]) => `${k}=${v}`).join("; ");
 
+        const reqHeaders = {
+            ...BASE_HEADERS,
+            "Cookie": cookieStr,
+        };
+
+        if (referer) {
+            reqHeaders["Referer"] = referer;
+        }
+
+        if (body) {
+            reqHeaders["Content-Type"] = "application/x-www-form-urlencoded";
+            reqHeaders["Content-Length"] = Buffer.byteLength(body);
+        }
+
         const reqOptions = {
             ...options,
-            headers: {
-                "User-Agent": "Mozilla/5.0 (Windows NT x.y; Win64; x64; rv:10.0) Gecko/20100101 Firefox/10.0",
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Cookie": cookieStr,
-                ...(options.headers || {})
-            }
+            headers: { ...reqHeaders, ...(options.headers || {}) }
         };
 
         const req = https.request(reqOptions, (res) => {
-            let data = "";
             const setCookies = {};
             (res.headers["set-cookie"] || []).forEach(c => {
                 const [kv] = c.split(";");
-                const [k, v] = kv.split("=");
-                if (k && v !== undefined) setCookies[k.trim()] = v.trim();
+                const eqIdx = kv.indexOf("=");
+                if (eqIdx > 0) {
+                    setCookies[kv.substring(0, eqIdx).trim()] = kv.substring(eqIdx + 1).trim();
+                }
             });
-            res.on("data", chunk => data += chunk);
-            res.on("end", () => resolve({
-                status: res.statusCode,
-                headers: res.headers,
-                cookies: setCookies,
-                body: data,
-                location: res.headers["location"] || ""
-            }));
+
+            // Zbierz chunki (może być gzip ale poczekamy na surowe dane)
+            const chunks = [];
+            res.on("data", chunk => chunks.push(chunk));
+            res.on("end", () => {
+                const data = Buffer.concat(chunks).toString("utf8");
+                resolve({
+                    status: res.statusCode,
+                    headers: res.headers,
+                    cookies: setCookies,
+                    body: data,
+                    location: res.headers["location"] || ""
+                });
+            });
         });
+
         req.on("error", reject);
+        req.setTimeout(30000, () => {
+            req.destroy(new Error("Request timeout"));
+        });
+
         if (body) req.write(body);
         req.end();
     });
 }
 
-// Logowanie OAuth: GET Authorization → POST Grant → ciasteczka sesji
 async function loginLibrus(login, pass) {
-    let sessionCookies = {};
+    let cookies = {};
 
-    // KROK 1: GET Authorization page - zdobądź ciasteczka i CSRF
+    // KROK 1: GET strony logowania - pobierz ciasteczka sesji
     const step1 = await httpsRequest({
         hostname: "api.librus.pl",
         path: "/OAuth/Authorization?client_id=46&response_type=code&scope=mydata",
         method: "GET"
-    }, null, {});
+    }, null, {}, "https://portal.librus.pl/rodzina/synergia/loguj");
 
-    Object.assign(sessionCookies, step1.cookies);
+    Object.assign(cookies, step1.cookies);
+    console.log("Step1 status:", step1.status, "cookies:", Object.keys(cookies));
 
-    // KROK 2: POST Grant - zaloguj się
+    // KROK 2: POST logowania z Referer (WYMAGANY od Nov 2025)
     const formData = `action=login&login=${encodeURIComponent(login)}&pass=${encodeURIComponent(pass)}`;
 
     const step2 = await httpsRequest({
         hostname: "api.librus.pl",
         path: "/OAuth/Authorization/Grant?client_id=46",
-        method: "POST",
-        headers: {
-            "Content-Length": Buffer.byteLength(formData),
-            "Referer": "https://api.librus.pl/OAuth/Authorization?client_id=46"
-        }
-    }, formData, sessionCookies);
+        method: "POST"
+    }, formData, cookies, "https://api.librus.pl/OAuth/Authorization?client_id=46&response_type=code&scope=mydata");
 
-    Object.assign(sessionCookies, step2.cookies);
+    Object.assign(cookies, step2.cookies);
+    console.log("Step2 status:", step2.status, "location:", step2.location, "body:", step2.body.substring(0, 200));
 
-    // Sprawdź czy zalogowanie się powiodło (powinno zwrócić redirect z kodem)
-    if (step2.status !== 302 && step2.status !== 200) {
-        throw new Error(`auth_failed:${step2.status}`);
-    }
-
-    // Sprawdź czy body zawiera błąd
-    if (step2.body && (
-        step2.body.includes("Błędny login lub hasło") ||
-        step2.body.includes("error") && step2.body.includes("invalid")
-    )) {
+    // Sprawdź czy OAuth zwrócił błąd logowania
+    if (step2.status === 200 && step2.body.includes("error")) {
         throw new Error("invalid_credentials");
     }
 
-    // KROK 3: Pobierz redirect URL z kodu autoryzacji i zdobądź ciasteczka Synergii
-    const redirectUrl = step2.location || step2.headers?.["location"] || "";
-    if (redirectUrl && redirectUrl.includes("?code=")) {
-        const url = new URL(redirectUrl.startsWith("http") ? redirectUrl : `https://synergia.librus.pl${redirectUrl}`);
+    // KROK 3: Podążaj za redirectem do Synergii
+    let redirectPath = step2.location;
+    if (!redirectPath && step2.body.includes("code=")) {
+        const codeMatch = step2.body.match(/code=([^&"]+)/);
+        if (codeMatch) redirectPath = `/OAuth/AuthorizationCode?code=${codeMatch[1]}`;
+    }
+
+    if (redirectPath) {
+        const isAbsolute = redirectPath.startsWith("http");
+        const hostname = isAbsolute ? new URL(redirectPath).hostname : "synergia.librus.pl";
+        const path = isAbsolute ? new URL(redirectPath).pathname + new URL(redirectPath).search : redirectPath;
+
         const step3 = await httpsRequest({
-            hostname: "synergia.librus.pl",
-            path: url.pathname + url.search,
+            hostname,
+            path,
             method: "GET"
-        }, null, sessionCookies);
-        Object.assign(sessionCookies, step3.cookies);
+        }, null, cookies, `https://api.librus.pl${step2.location || ""}`);
+
+        Object.assign(cookies, step3.cookies);
+        console.log("Step3 status:", step3.status, "cookies now:", Object.keys(cookies));
+
+        // Jeśli kolejny redirect - idź dalej
+        if (step3.location) {
+            const step4 = await httpsRequest({
+                hostname: "synergia.librus.pl",
+                path: step3.location.startsWith("/") ? step3.location : new URL(step3.location).pathname + new URL(step3.location).search,
+                method: "GET"
+            }, null, cookies, `https://synergia.librus.pl${step3.location}`);
+            Object.assign(cookies, step4.cookies);
+            console.log("Step4 status:", step4.status, "cookies now:", Object.keys(cookies));
+        }
     }
 
-    // Sprawdź czy mamy ciasteczka sesji Synergii
-    if (!sessionCookies["DZIENNIKSID"] && !sessionCookies["SDZIENNIKSID"]) {
-        // Spróbuj bezpośrednio strony Synergii
-        const directLogin = await httpsRequest({
-            hostname: "synergia.librus.pl",
-            path: "/loguj",
-            method: "POST",
-            headers: { "Content-Length": Buffer.byteLength(`login=${encodeURIComponent(login)}&pass=${encodeURIComponent(pass)}`) }
-        }, `login=${encodeURIComponent(login)}&pass=${encodeURIComponent(pass)}`, sessionCookies);
-        Object.assign(sessionCookies, directLogin.cookies);
+    // Weryfikujemy czy mamy ciasteczka sesji Synergii
+    if (!cookies["DZIENNIKSID"] && !cookies["SDZIENNIKSID"]) {
+        console.log("Brak ciasteczek Synergii. Dostępne:", Object.keys(cookies));
+        throw new Error("no_session_cookies");
     }
 
-    return sessionCookies;
+    return cookies;
 }
 
-// Pobieranie strony z sesją Synergii 
-async function fetchSynergiaPage(path, cookies) {
-    const response = await httpsRequest({
+async function fetchPage(path, cookies, referer) {
+    const resp = await httpsRequest({
         hostname: "synergia.librus.pl",
-        path: path,
+        path,
         method: "GET"
-    }, null, cookies);
+    }, null, cookies, referer || "https://synergia.librus.pl/uczen/index");
 
-    if (response.status === 302) {
-        // Nieautoryzowany - sesja wygasła
+    if (resp.status === 302 || resp.status === 301) {
         throw new Error("session_expired");
     }
-
-    return response.body;
+    return resp.body;
 }
 
-// Parsowanie ocen z HTML
 function parseGrades(html) {
-    const grades = [];
-    if (!html) return grades;
+    if (!html || html.length < 100) return [];
+    const results = [];
 
-    // Tabela z klasą "decorated" zawiera oceny  
-    const tableMatch = html.match(/<table[^>]*class="[^"]*decorated[^"]*"[^>]*>([\s\S]*?)<\/table>/i);
-    if (!tableMatch) return grades;
+    // Szukamy tabeli z ocenami (index=1 zgodnie z fix PR #82)
+    const tables = html.match(/<table[^>]*class="[^"]*decorated[^"]*"[^>]*>[\s\S]*?<\/table>/gi) || [];
+    const gradesTable = tables[1] || tables[0]; // index 1 = właściwa tabela ocen
+    if (!gradesTable) return [];
 
-    const tbody = tableMatch[1];
-    const rows = tbody.match(/<tr[^>]*>([\s\S]*?)<\/tr>/gi) || [];
-
+    const rows = gradesTable.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) || [];
     rows.forEach(row => {
-        const cells = row.match(/<td[^>]*>([\s\S]*?)<\/td>/gi) || [];
+        if (row.includes("<th")) return; // pomiń nagłówki
+
+        const cells = row.match(/<td[^>]*>[\s\S]*?<\/td>/gi) || [];
         if (cells.length < 2) return;
 
-        const subject = cells[0].replace(/<[^>]+>/g, "").trim();
+        const subject = cells[0].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
         if (!subject || subject.length < 2) return;
 
-        // Poszukaj linków z ocenami (class="grade-box" lub tytuł w title=)
-        const gradeLinks = row.match(/<a[^>]*title="([^"]*)"[^>]*>([^<]*)<\/a>/gi) || [];
-        gradeLinks.forEach(link => {
-            const titleMatch = link.match(/title="([^"]*)"/);
-            const gradeMatch = link.match(/>([^<]+)<\/a>/);
-            const grade = gradeMatch?.[1]?.trim();
-            const desc = titleMatch?.[1]?.split(";")?.[0]?.trim() || "Ocena";
-            if (grade && grade.length > 0 && grade !== " ") {
-                grades.push({ subject, grade, desc });
+        // Szukaj linków z ocenami (posiadają tytuł z opisem)
+        const links = row.match(/<a[^>]*title="([^"]+)"[^>]*>([\d.,+\-\/\\]+)<\/a>/gi) || [];
+        links.forEach(link => {
+            const titleM = link.match(/title="([^"]*)"/);
+            const gradeM = link.match(/>([^<]+)<\/a>/);
+            const grade = gradeM?.[1]?.trim();
+            if (grade) {
+                results.push({
+                    subject,
+                    grade,
+                    desc: titleM?.[1]?.split(";")?.[0]?.trim() || "Ocena"
+                });
             }
         });
     });
 
-    return grades;
+    return results;
 }
 
-// Parsowanie frekwencji z HTML
 function parseAttendance(html) {
-    if (!html) return { presence_percentage: 0, unexcused: 0, excused: 0, late: 0 };
+    const def = { presence_percentage: 0, unexcused: 0, excused: 0, late: 0 };
+    if (!html) return def;
 
-    const percentMatch = html.match(/(\d+[,.]?\d*)\s*%/);
-    const percent = percentMatch ? parseFloat(percentMatch[1].replace(",", ".")) : 0;
+    const m = html.match(/(\d+[,.]?\d*)\s*%/);
+    const percent = m ? parseFloat(m[1].replace(",", ".")) : 0;
 
     let unexcused = 0, excused = 0, late = 0;
-    const cells = html.match(/<td[^>]*>([^<]*)<\/td>/gi) || [];
-    cells.forEach(cell => {
+    (html.match(/<td[^>]*>([^<]*)<\/td>/gi) || []).forEach(cell => {
         const t = cell.replace(/<[^>]+>/g, "").trim().toLowerCase();
         if (t === "nb" || t === "u") unexcused++;
-        else if (t === "nb_u" || t === "us" || t === "uw") excused++;
+        else if (t === "nb_u" || t === "uw" || t === "us") excused++;
         else if (t === "sp") late++;
     });
 
     return { presence_percentage: percent, unexcused, excused, late };
 }
 
-// Parsowanie planu lekcji z HTML
 function parseTimetable(html) {
     if (!html) return [];
     const lessons = [];
     const days = ["Pn", "Wt", "Śr", "Czw", "Pt"];
 
-    const rows = html.match(/<tr[^>]*>([\s\S]*?)<\/tr>/gi) || [];
-    rows.forEach(row => {
-        const cells = row.match(/<td[^>]*>([\s\S]*?)<\/td>/gi) || [];
+    (html.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) || []).forEach(row => {
+        const cells = row.match(/<td[^>]*>[\s\S]*?<\/td>/gi) || [];
         if (cells.length < 2) return;
-
-        const timeCell = cells[0].replace(/<[^>]+>/g, "").trim();
+        const time = cells[0].replace(/<[^>]+>/g, "").trim();
 
         cells.slice(1).forEach((cell, idx) => {
-            // Szukaj tekstu lekcji - zazwyczaj w divie
-            const textMatch = cell.match(/class="text"[^>]*>([^<]+)/i) ||
-                cell.match(/class="lesson"[^>]*>([^<]+)/i);
-            const roomMatch = cell.match(/class="classroom"[^>]*>([^<]+)/i) ||
-                cell.match(/class="room"[^>]*>([^<]+)/i);
-
-            const subject = textMatch?.[1]?.trim();
-            const room = roomMatch?.[1]?.trim() || "-";
-
-            if (subject && idx < 5) {
-                lessons.push({
-                    day: days[idx],
-                    subject,
-                    room,
-                    time: timeCell
-                });
+            if (idx >= 5) return;
+            const textM = cell.match(/class="text"[^>]*>([\s\S]*?)<\/\w+>/i);
+            const roomM = cell.match(/class="classroom"[^>]*>([^<]+)/i);
+            const subject = textM?.[1]?.replace(/<[^>]+>/g, "")?.trim();
+            if (subject) {
+                lessons.push({ day: days[idx], subject, room: roomM?.[1]?.trim() || "-", time });
             }
         });
     });
@@ -223,58 +244,69 @@ function parseTimetable(html) {
     return lessons;
 }
 
-// Weryfikacja sesji po logowaniu
-async function verifySession(cookies) {
-    try {
-        const html = await fetchSynergiaPage("/uczen/index", cookies);
-        // Sprawdź czy strona zawiera elementy logowanego użytkownika
-        return !html.includes("loguj") && html.length > 1000;
-    } catch {
-        return false;
-    }
-}
-
+// Główny endpoint
 app.post("/librus", async (req, res) => {
     const { login, pass } = req.body;
     if (!login || !pass) return res.status(400).json({ error: "Brak danych logowania." });
 
     try {
-        // Zaloguj się przez OAuth API
-        let sessionCookies;
+        let cookies;
         try {
-            sessionCookies = await loginLibrus(login, pass);
+            cookies = await loginLibrus(login, pass);
         } catch (err) {
-            if (err.message.includes("invalid_credentials") || err.message.includes("auth_failed")) {
-                return res.status(401).json({ error: "Nieprawidłowy login lub hasło Synergia." });
+            if (err.message === "invalid_credentials") {
+                return res.status(401).json({ error: "Nieprawidłowy login lub hasło." });
+            }
+            if (err.message === "no_session_cookies") {
+                return res.status(401).json({ error: "Nie udało się uzyskać sesji Synergii." });
             }
             throw err;
         }
 
-        // Zweryfikuj sesję
-        const isValid = await verifySession(sessionCookies);
-        if (!isValid) {
-            return res.status(401).json({ error: "Nie udało się zalogować do Synergii. Sprawdź dane." });
-        }
-
         // Pobierz dane równolegle
-        const [gradesHtml, attendanceHtml, timetableHtml] = await Promise.allSettled([
-            fetchSynergiaPage("/przegladaj_oceny/uczen", sessionCookies),
-            fetchSynergiaPage("/przegladaj_nb/uczen", sessionCookies),
-            fetchSynergiaPage("/przegladaj_plan_lekcji", sessionCookies)
+        const [gradesRes, attendanceRes, timetableRes] = await Promise.allSettled([
+            fetchPage("/przegladaj_oceny/uczen", cookies),
+            fetchPage("/przegladaj_nb/uczen", cookies),
+            fetchPage("/przegladaj_plan_lekcji", cookies)
         ]);
 
-        const grades = gradesHtml.status === "fulfilled" ? parseGrades(gradesHtml.value) : [];
-        const attendance = attendanceHtml.status === "fulfilled" ? parseAttendance(attendanceHtml.value) : { presence_percentage: 0 };
-        const timetable = timetableHtml.status === "fulfilled" ? parseTimetable(timetableHtml.value) : [];
+        const grades = gradesRes.status === "fulfilled" ? parseGrades(gradesRes.value) : [];
+        const attendance = attendanceRes.status === "fulfilled" ? parseAttendance(attendanceRes.value) : { presence_percentage: 0 };
+        const timetable = timetableRes.status === "fulfilled" ? parseTimetable(timetableRes.value) : [];
 
-        return res.json({
-            status: "success",
-            data: { grades, attendance, timetable }
-        });
+        return res.json({ status: "success", data: { grades, attendance, timetable } });
 
     } catch (err) {
-        console.error("Error:", err.message);
-        return res.status(500).json({ error: "Błąd serwera: " + (err.message || "nieznany") });
+        console.error("Error:", err.message, err.stack?.split("\n")[1]);
+        return res.status(500).json({ error: "Błąd serwera: " + err.message });
+    }
+});
+
+// Endpoint diagnostyczny
+app.post("/debug-login", async (req, res) => {
+    const { login, pass } = req.body;
+    if (!login || !pass) return res.status(400).json({ error: "Brak danych." });
+
+    const debug = {};
+    try {
+        const step1 = await httpsRequest({
+            hostname: "api.librus.pl",
+            path: "/OAuth/Authorization?client_id=46&response_type=code&scope=mydata",
+            method: "GET"
+        }, null, {}, "https://portal.librus.pl/rodzina/synergia/loguj");
+        debug.step1 = { status: step1.status, cookies: step1.cookies };
+
+        const formData = `action=login&login=${encodeURIComponent(login)}&pass=${encodeURIComponent(pass)}`;
+        const step2 = await httpsRequest({
+            hostname: "api.librus.pl",
+            path: "/OAuth/Authorization/Grant?client_id=46",
+            method: "POST"
+        }, formData, step1.cookies, "https://api.librus.pl/OAuth/Authorization?client_id=46&response_type=code&scope=mydata");
+        debug.step2 = { status: step2.status, cookies: step2.cookies, location: step2.location, body: step2.body.substring(0, 300) };
+
+        return res.json(debug);
+    } catch (err) {
+        return res.status(500).json({ error: err.message, debug });
     }
 });
 
