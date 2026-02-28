@@ -63,13 +63,19 @@ function buildIdMap(items = []) {
  * @returns {Promise<Array>} Lista ocen [{subject, grade, category, weight, date, teacher}]
  */
 async function getGrades(client) {
-    // Równolegle pobieramy wszystkie potrzebne dane, dodając obsługę Ocen Punktowych (które TEB używa powszechnie)
-    const [gradesData, subjectsData, categoriesData, pointGradesData, pointCategoriesData] = await Promise.all([
+    // Równolegle pobieramy wszystkie potrzebne dane, dodając obsługę Ocen Punktowych i Tekstowych
+    const [
+        gradesData, subjectsData, categoriesData,
+        pointGradesData, pointCategoriesData,
+        textGradesData, descriptiveGradesData
+    ] = await Promise.all([
         fetchResource(client, "/Grades"),
         fetchResource(client, "/Subjects"),
         fetchResource(client, "/Grades/Categories"),
         fetchResource(client, "/PointGrades"),
         fetchResource(client, "/PointGrades/Categories"),
+        fetchResource(client, "/TextGrades"),
+        fetchResource(client, "/DescriptiveGrades")
     ]);
 
     // Buduj mapy ID -> Nazwa
@@ -113,7 +119,9 @@ async function getGrades(client) {
     return {
         grades: [...standardGrades, ...pointGrades],
         debug_standard: gradesData?.Grades || [],
-        debug_point: pointGradesData?.PointGrades || []
+        debug_point: pointGradesData?.PointGrades || [],
+        debug_text: textGradesData || null,
+        debug_descriptive: descriptiveGradesData || null
     };
 }
 
