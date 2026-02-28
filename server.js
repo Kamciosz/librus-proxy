@@ -344,6 +344,25 @@ app.post("/debug-login", async (req, res) => {
     }
 });
 
+// Tymczasowy endpoint - zwraca surowy HTML strony ocen
+app.post("/debug-html", async (req, res) => {
+    const { login, pass } = req.body;
+    if (!login || !pass) return res.status(400).json({ error: "Brak danych." });
+    try {
+        const cookies = await loginLibrus(login, pass);
+        const html = await fetchPage("/przegladaj_oceny/uczen", cookies);
+        return res.json({
+            html_length: html.length,
+            html_excerpt: html.substring(0, 5000),
+            has_decorated: html.includes("decorated"),
+            has_table: html.includes("<table"),
+            cookies: Object.keys(cookies)
+        });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
 app.get("/health", (req, res) => res.json({ status: "ok", time: new Date().toISOString() }));
 
 app.listen(PORT, () => console.log(`Librus OAuth Proxy running on port ${PORT}`));
