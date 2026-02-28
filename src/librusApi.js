@@ -125,14 +125,21 @@ async function getGrades(client) {
 
         // Zwykle w Librus oceny to tabele, przedmioty sa w 2 komórce tr.line0, tr.line1
         $('table tr').each((i, row) => {
-            const cells = $(row).find('td');
-            if (cells.length >= 2) {
-                const possibleSubject = $(cells[1]).text().trim();
+            // Szukamy a w class="grade-box" 
+            $(row).find('.grade-box a').each((_, aTag) => {
+                const gradeText = $(aTag).text().trim(); // Np. 10/10
+                if (gradeText && gradeText.includes('/')) {
 
-                // Szukamy a w class="grade-box" 
-                $(row).find('.grade-box a').each((_, aTag) => {
-                    const gradeText = $(aTag).text().trim(); // Np. 10/10
-                    if (possibleSubject && gradeText && gradeText.includes('/')) {
+                    // Bezpieczne znajdowanie przedmiotu - pierwszy nie-linkowy td zawierający tekst
+                    let possibleSubject = '';
+                    $(row).find('td').each((j, td) => {
+                        const txt = $(td).text().trim();
+                        if (txt.length > 3 && $(td).find('a').length === 0 && !possibleSubject) {
+                            possibleSubject = txt;
+                        }
+                    });
+
+                    if (possibleSubject) {
                         let cat = $(aTag).attr('title') || 'Wpis punktowy';
 
                         // Parsowanie "Kategoria: Test z sieci<br>Data: ..."
@@ -152,8 +159,8 @@ async function getGrades(client) {
                             type: 'point_html_scraped'
                         });
                     }
-                });
-            }
+                }
+            });
         });
     } catch (err) {
         console.error("HTML Scraping failed:", err.message);
