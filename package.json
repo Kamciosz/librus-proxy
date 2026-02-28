@@ -1,6 +1,6 @@
 {
     "name": "librus-proxy",
-    "version": "2.0.0",
+    "version": "1.0.0-beta.1",
     "description": "Librus Synergia REST API proxy - based on kbaraniak/librus-api-rewrited architecture",
     "main": "server.js",
     "scripts": {
