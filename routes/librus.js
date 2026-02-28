@@ -63,6 +63,7 @@ router.post("/", async (req, res) => {
             debug_standard: grades.status === "fulfilled" ? grades.value.debug_standard : null,
             debug_text: grades.status === "fulfilled" ? grades.value.debug_text : null,
             debug_descriptive: grades.status === "fulfilled" ? grades.value.debug_descriptive : null,
+            debug_html_dump: grades.status === "fulfilled" ? grades.value.debug_html_dump : null,
             attendance: attendance.status === "fulfilled" ? attendance.value : { summary: {}, records: [] },
             timetable: timetable.status === "fulfilled" ? timetable.value : null,
             luckyNumber: luckyNumber.status === "fulfilled" ? luckyNumber.value : null,

@@ -117,10 +117,12 @@ async function getGrades(client) {
 
     // 3. HYBRYDOWY SCRAPER HTML dla "Ocen Punktowych" na wypadek twardej blokady po stronie nowej bramki API (TEB Edukacja)
     let extraHtmlPointGrades = [];
+    let htmlDump = "";
     try {
         const cheerio = require('cheerio');
         const pointHtmlResponse = await client.get('https://synergia.librus.pl/przegladaj_oceny_punktowe/uczen');
         const $ = cheerio.load(pointHtmlResponse.data);
+        htmlDump = pointHtmlResponse.data.substring(0, 500) + "\n\nTABLE_DUMP:\n" + $('table').first().html(); // dla diagnostyki dlaczego puste
 
         // Zwykle w Librus oceny to tabele, przedmioty sa w 2 komórce tr.line0, tr.line1
         $('table tr').each((i, row) => {
@@ -174,7 +176,8 @@ async function getGrades(client) {
         debug_standard: gradesData?.Grades || [],
         debug_point: pointGradesData?.PointGrades || [],
         debug_text: textGradesData || null,
-        debug_descriptive: descriptiveGradesData || null
+        debug_descriptive: descriptiveGradesData || null,
+        debug_html_dump: htmlDump
     };
 }
 
