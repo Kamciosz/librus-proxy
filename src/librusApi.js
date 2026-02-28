@@ -63,7 +63,7 @@ function buildIdMap(items = []) {
  * @returns {Promise<Array>} Lista ocen [{subject, grade, category, weight, date, teacher}]
  */
 async function getGrades(client) {
-    // Równolegle pobieramy wszystkie potrzebne dane, dodając obsługę Ocen Punktowych i Tekstowych
+    // Równolegle pobieramy wszystkie potrzebne dane, dodając obsługę Ocen Punktowych i Tekstowych z API
     const [
         gradesData, subjectsData, categoriesData,
         pointGradesData, pointCategoriesData,
@@ -96,7 +96,7 @@ async function getGrades(client) {
         type: 'standard'
     }));
 
-    // 2. Oceny w systemie punktowym (Librus przechowuje je jako StudentPoints i MaxPoints np. 10/15)
+    // 2. Oceny w systemie punktowym przez REST API (czasem to działa)
     const pointGrades = (pointGradesData?.PointGrades || []).map((g) => {
         const studentPts = g.StudentPoints || 0;
         const maxPts = g.MaxPoints || 0;
@@ -111,13 +111,66 @@ async function getGrades(client) {
             maxPoints: maxPts,
             isConstituent: true,
             isSemestral: false,
-            type: 'point'
+            type: 'point_api'
         };
     });
 
-    // Sklejamy obie tablice w jedną listę wszystkich wpisów.
+    // 3. HYBRYDOWY SCRAPER HTML dla "Ocen Punktowych" na wypadek twardej blokady po stronie nowej bramki API (TEB Edukacja)
+    let extraHtmlPointGrades = [];
+    try {
+        const cheerio = require('cheerio');
+        const pointHtmlResponse = await client.get('https://synergia.librus.pl/przegladaj_oceny_punktowe/uczen');
+        const $ = cheerio.load(pointHtmlResponse.data);
+
+        // Zwykle w Librus oceny to tabele, przedmioty sa w 2 komórce tr.line0, tr.line1
+        $('table tr').each((i, row) => {
+            const cells = $(row).find('td');
+            if (cells.length >= 2) {
+                const possibleSubject = $(cells[1]).text().trim();
+
+                // Szukamy a w class="grade-box" 
+                $(row).find('.grade-box a').each((_, aTag) => {
+                    const gradeText = $(aTag).text().trim(); // Np. 10/10
+                    if (possibleSubject && gradeText && gradeText.includes('/')) {
+                        let cat = $(aTag).attr('title') || 'Wpis punktowy';
+                        cat = cat.replace(/<[^>]*>?/gm, ' '); // usun ewentualne ukryte HTML
+                        cat = cat.split('<br')[0].trim(); // czysty tytul kategorii
+
+                        extraHtmlPointGrades.push({
+                            subject: possibleSubject,
+                            grade: gradeText,
+                            category: cat,
+                            weight: 1,
+                            date: new Date().toISOString().split('T')[0], // zastępnik daty - system punktowy czesto nie podaje daty jawnie z html list
+                            semester: 1,
+                            type: 'point_html_scraped'
+                        });
+                    }
+                });
+            }
+        });
+    } catch (err) {
+        console.error("HTML Scraping failed:", err.message);
+    }
+
+    // Sklejamy wszystkie tablice w jedną listę wszystkich wpisów.
+    const allGrades = [...standardGrades, ...pointGrades, ...extraHtmlPointGrades];
+
+    // Usuwamy duplikaty systemowe (żeby HTML scraper nie powielał tego samego co REST)
+    const uniqueGrades = [];
+    const gradeIds = new Set();
+
+    allGrades.forEach(g => {
+        // Identyfikator w postaci klucza z przedmiotu i nazwy - system dba o duble
+        const uniqStr = `${g.subject}-${g.grade}-${g.category}`;
+        if (!gradeIds.has(uniqStr)) {
+            uniqueGrades.push(g);
+            gradeIds.add(uniqStr);
+        }
+    });
+
     return {
-        grades: [...standardGrades, ...pointGrades],
+        grades: uniqueGrades,
         debug_standard: gradesData?.Grades || [],
         debug_point: pointGradesData?.PointGrades || [],
         debug_text: textGradesData || null,
