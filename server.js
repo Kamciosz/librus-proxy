@@ -18,51 +18,64 @@ async function loginToLibrus(browser, login, pass) {
     const page = await context.newPage();
 
     try {
-        // Użyj właściwego URL logowania przez portal Librus Rodzina
+        // URL logowania przez portal Librus Rodzina
         await page.goto("https://portal.librus.pl/rodzina/synergia/loguj", {
             waitUntil: "networkidle",
             timeout: 30000,
         });
 
-        // Poczekaj na załadowanie formularza
-        await page.waitForSelector('input[id="Login"], input[name="Login"], input[type="text"]', { timeout: 10000 });
+        // Formularz logowania jest w IFRAME - iterujemy przez wszystkie ramki
+        const frames = page.frames();
+        let loginFrame = null;
 
-        // Wpisz login
-        const loginInput = await page.$('input[id="Login"]') ||
-            await page.$('input[name="login"]') ||
-            await page.$('input[type="text"]');
-        if (loginInput) await loginInput.fill(login);
+        for (const frame of frames) {
+            try {
+                const el = await frame.$('input[id="Login"]') || await frame.$('input[name="Login"]');
+                if (el) {
+                    loginFrame = frame;
+                    break;
+                }
+            } catch (_) { }
+        }
 
-        // Wpisz hasło
-        const passInput = await page.$('input[id="Pass"]') ||
-            await page.$('input[name="pass"]') ||
-            await page.$('input[type="password"]');
-        if (passInput) await passInput.fill(pass);
+        if (loginFrame) {
+            // Wpisz dane w iframe
+            await loginFrame.fill('input[id="Login"]', login).catch(() =>
+                loginFrame.fill('input[name="Login"]', login)
+            );
+            await loginFrame.fill('input[id="Pass"]', pass).catch(() =>
+                loginFrame.fill('input[type="password"]', pass)
+            );
+            await Promise.all([
+                page.waitForNavigation({ timeout: 20000 }).catch(() => { }),
+                loginFrame.click('input[type="submit"], button[type="submit"]'),
+            ]);
+        } else {
+            // Fallback: formularz w głównym dokumencie
+            await page.waitForSelector('input[id="Login"], input[type="text"]', { timeout: 10000 });
+            await page.fill('input[id="Login"]', login).catch(() => page.fill('input[type="text"]', login));
+            await page.fill('input[id="Pass"]', pass).catch(() => page.fill('input[type="password"]', pass));
+            await Promise.all([
+                page.waitForNavigation({ timeout: 20000 }).catch(() => { }),
+                page.click('input[type="submit"], button[type="submit"]'),
+            ]);
+        }
 
-        // Kliknij przycisk zaloguj
-        await Promise.all([
-            page.waitForNavigation({ timeout: 15000 }).catch(() => { }),
-            page.click('button[type="submit"], input[type="submit"], .btn-login, button:has-text("Zaloguj"), button:has-text("ZALOGUJ")'),
-        ]);
-
-        // Poczekaj chwilę
         await page.waitForTimeout(2000);
 
         const url = page.url();
         const content = await page.content();
 
-        // Sprawdź czy logowanie powiodło się
         if (
             content.toLowerCase().includes("błędny") ||
             content.toLowerCase().includes("nieprawidłowy") ||
             content.includes("Podaj login") ||
-            url.includes("loguj")
+            (url.includes("loguj") && !url.includes("uczen"))
         ) {
             await context.close();
             return null;
         }
 
-        // Jeśli przekierował na stronę Synergii - sukces
         return { context, page };
     } catch (err) {
         await context.close();
@@ -77,37 +90,24 @@ async function getGrades(page) {
             timeout: 20000,
         });
 
-        const grades = await page.evaluate(() => {
+        return await page.evaluate(() => {
             const results = [];
-            const rows = document.querySelectorAll("table.decorated tbody tr");
-
-            rows.forEach((row) => {
+            document.querySelectorAll("table.decorated tbody tr").forEach((row) => {
                 const cells = row.querySelectorAll("td");
                 if (cells.length < 2) return;
-
                 const subject = cells[0]?.textContent?.trim();
-                if (!subject || subject === "") return;
-
-                // Szukaj linków z ocenami (punktowymi i tradycyjnymi)
+                if (!subject) return;
                 for (let i = 1; i < cells.length; i++) {
-                    const anchors = cells[i].querySelectorAll("a");
-                    anchors.forEach((a) => {
+                    cells[i].querySelectorAll("a").forEach((a) => {
                         const grade = a.textContent?.trim();
-                        if (!grade || grade === "") return;
+                        if (!grade) return;
                         const title = a.getAttribute("title") || "";
-                        results.push({
-                            subject,
-                            grade,
-                            desc: title.split(";")[0]?.trim() || "Ocena",
-                        });
+                        results.push({ subject, grade, desc: title.split(";")[0]?.trim() || "Ocena" });
                     });
                 }
             });
-
             return results;
         });
-
-        return grades;
     } catch (err) {
         console.error("Grades error:", err.message);
         return [];
@@ -124,10 +124,7 @@ async function getAttendance(page) {
         return await page.evaluate(() => {
             const text = document.body.innerText;
             const percentMatch = text.match(/(\d+[,.]?\d*)\s*%/);
-            const percent = percentMatch
-                ? parseFloat(percentMatch[1].replace(",", "."))
-                : 0;
-
+            const percent = percentMatch ? parseFloat(percentMatch[1].replace(",", ".")) : 0;
             let unexcused = 0, excused = 0, late = 0;
             document.querySelectorAll("td").forEach((td) => {
                 const t = td.textContent?.trim().toLowerCase();
@@ -135,7 +132,6 @@ async function getAttendance(page) {
                 else if (t === "nb_u" || t === "us") excused++;
                 else if (t === "sp") late++;
             });
-
             return { presence_percentage: percent, unexcused, excused, late };
         });
     } catch {
@@ -153,25 +149,14 @@ async function getTimetable(page) {
         return await page.evaluate(() => {
             const lessons = [];
             const days = ["Pn", "Wt", "Śr", "Czw", "Pt"];
-
             document.querySelectorAll("table.decorated tbody tr").forEach((row) => {
-                const timeCell = row.querySelector("td:first-child");
-                const time = timeCell?.textContent?.trim() || "";
-
+                const time = row.querySelector("td:first-child")?.textContent?.trim() || "";
                 row.querySelectorAll("td:not(:first-child)").forEach((cell, idx) => {
                     const text = cell.querySelector(".text, .lesson-subject")?.textContent?.trim();
                     const room = cell.querySelector(".classroom, .room")?.textContent?.trim();
-                    if (text) {
-                        lessons.push({
-                            day: days[idx] || idx.toString(),
-                            subject: text,
-                            room: room || "-",
-                            time,
-                        });
-                    }
+                    if (text) lessons.push({ day: days[idx] || idx.toString(), subject: text, room: room || "-", time });
                 });
             });
-
             return lessons;
         });
     } catch {
@@ -181,8 +166,7 @@ async function getTimetable(page) {
 
 app.post("/librus", async (req, res) => {
     const { login, pass } = req.body;
-    if (!login || !pass)
-        return res.status(400).json({ error: "Brak danych logowania." });
+    if (!login || !pass) return res.status(400).json({ error: "Brak danych logowania." });
 
     let browser;
     try {
@@ -198,17 +182,12 @@ app.post("/librus", async (req, res) => {
         }
 
         const { page } = session;
-
         const grades = await getGrades(page);
         const attendance = await getAttendance(page);
         const timetable = await getTimetable(page);
-
         await browser.close();
 
-        return res.json({
-            status: "success",
-            data: { grades, attendance, timetable },
-        });
+        return res.json({ status: "success", data: { grades, attendance, timetable } });
     } catch (err) {
         if (browser) await browser.close().catch(() => { });
         console.error("Server error:", err.message);
