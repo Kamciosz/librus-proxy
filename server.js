@@ -9,9 +9,6 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3001;
 
-// Cache sesji – każdy zalogowany użytkownik ma swój token (trzymamy max 1h)
-const sessionCache = new Map();
-
 async function loginToLibrus(browser, login, pass) {
     const context = await browser.newContext({
         userAgent:
@@ -21,33 +18,51 @@ async function loginToLibrus(browser, login, pass) {
     const page = await context.newPage();
 
     try {
-        // Wejdź na stronę logowania
-        await page.goto("https://synergia.librus.pl/loguj", {
-            waitUntil: "domcontentloaded",
+        // Użyj właściwego URL logowania przez portal Librus Rodzina
+        await page.goto("https://portal.librus.pl/rodzina/synergia/loguj", {
+            waitUntil: "networkidle",
             timeout: 30000,
         });
 
-        // Wpisz dane logowania
-        await page.fill('input[name="login"]', login);
-        await page.fill('input[name="pass"]', pass);
-        await page.click('input[type="submit"], button[type="submit"]');
+        // Poczekaj na załadowanie formularza
+        await page.waitForSelector('input[id="Login"], input[name="Login"], input[type="text"]', { timeout: 10000 });
 
-        // Poczekaj na przekierowanie po zalogowaniu
-        await page.waitForNavigation({ timeout: 15000 }).catch(() => { });
+        // Wpisz login
+        const loginInput = await page.$('input[id="Login"]') ||
+            await page.$('input[name="login"]') ||
+            await page.$('input[type="text"]');
+        if (loginInput) await loginInput.fill(login);
 
-        // Sprawdź czy zalogowanie się powiodło
+        // Wpisz hasło
+        const passInput = await page.$('input[id="Pass"]') ||
+            await page.$('input[name="pass"]') ||
+            await page.$('input[type="password"]');
+        if (passInput) await passInput.fill(pass);
+
+        // Kliknij przycisk zaloguj
+        await Promise.all([
+            page.waitForNavigation({ timeout: 15000 }).catch(() => { }),
+            page.click('button[type="submit"], input[type="submit"], .btn-login, button:has-text("Zaloguj"), button:has-text("ZALOGUJ")'),
+        ]);
+
+        // Poczekaj chwilę
+        await page.waitForTimeout(2000);
+
         const url = page.url();
         const content = await page.content();
 
+        // Sprawdź czy logowanie powiodło się
         if (
-            content.includes("Błędny") ||
+            content.toLowerCase().includes("błędny") ||
+            content.toLowerCase().includes("nieprawidłowy") ||
             content.includes("Podaj login") ||
             url.includes("loguj")
         ) {
             await context.close();
-            return null; // błąd logowania
+            return null;
         }
 
+        // Jeśli przekierował na stronę Synergii - sukces
         return { context, page };
     } catch (err) {
         await context.close();
@@ -73,32 +88,19 @@ async function getGrades(page) {
                 const subject = cells[0]?.textContent?.trim();
                 if (!subject || subject === "") return;
 
-                // Zbierz oceny z pozostałych kolumn
+                // Szukaj linków z ocenami (punktowymi i tradycyjnymi)
                 for (let i = 1; i < cells.length; i++) {
-                    const gradeAnchors = cells[i].querySelectorAll("a, span.grade-box");
-                    gradeAnchors.forEach((el) => {
-                        const grade = el.textContent?.trim();
-                        if (grade && grade.length > 0 && grade !== "&nbsp;") {
-                            const title =
-                                el.getAttribute("title") ||
-                                el.closest("td")?.querySelector(".tooltip")?.textContent ||
-                                "Ocena";
-                            results.push({
-                                subject,
-                                grade,
-                                desc: title.split(";")[0]?.trim() || "Ocena",
-                            });
-                        }
+                    const anchors = cells[i].querySelectorAll("a");
+                    anchors.forEach((a) => {
+                        const grade = a.textContent?.trim();
+                        if (!grade || grade === "") return;
+                        const title = a.getAttribute("title") || "";
+                        results.push({
+                            subject,
+                            grade,
+                            desc: title.split(";")[0]?.trim() || "Ocena",
+                        });
                     });
-
-                    // Jeśli nie ma linków, sprawdź tekst komórki (oceny końcowe)
-                    if (gradeAnchors.length === 0) {
-                        const text = cells[i].textContent?.trim();
-                        const header = document.querySelector(`table.decorated thead th:nth-child(${i + 1})`)?.textContent?.trim();
-                        if (text && text !== "" && text !== "-" && header) {
-                            results.push({ subject, grade: text, desc: header });
-                        }
-                    }
                 }
             });
 
@@ -107,7 +109,7 @@ async function getGrades(page) {
 
         return grades;
     } catch (err) {
-        console.error("Error getting grades:", err.message);
+        console.error("Grades error:", err.message);
         return [];
     }
 }
@@ -119,38 +121,24 @@ async function getAttendance(page) {
             timeout: 20000,
         });
 
-        const attendance = await page.evaluate(() => {
-            // Szukamy procentu obecności
+        return await page.evaluate(() => {
             const text = document.body.innerText;
             const percentMatch = text.match(/(\d+[,.]?\d*)\s*%/);
             const percent = percentMatch
                 ? parseFloat(percentMatch[1].replace(",", "."))
                 : 0;
 
-            // Zlicz nieobecności
-            const cells = document.querySelectorAll("td.center");
-            let unexcused = 0;
-            let excused = 0;
-            let late = 0;
-            cells.forEach((cell) => {
-                const abbr = cell.querySelector("abbr");
-                const type = abbr?.getAttribute("title") || cell.textContent?.trim();
-                if (type.includes("nieusprawiedliwiona") || type === "u" || type === "nb")
-                    unexcused++;
-                else if (type.includes("usprawiedliwiona") || type === "nb_u") excused++;
-                else if (type.includes("spóźnienie") || type === "sp") late++;
+            let unexcused = 0, excused = 0, late = 0;
+            document.querySelectorAll("td").forEach((td) => {
+                const t = td.textContent?.trim().toLowerCase();
+                if (t === "nb" || t === "u") unexcused++;
+                else if (t === "nb_u" || t === "us") excused++;
+                else if (t === "sp") late++;
             });
 
-            return {
-                presence_percentage: percent,
-                unexcused,
-                excused,
-                late,
-            };
+            return { presence_percentage: percent, unexcused, excused, late };
         });
-
-        return attendance;
-    } catch (err) {
+    } catch {
         return { presence_percentage: 0, unexcused: 0, excused: 0, late: 0 };
     }
 }
@@ -162,28 +150,23 @@ async function getTimetable(page) {
             timeout: 20000,
         });
 
-        const timetable = await page.evaluate(() => {
+        return await page.evaluate(() => {
             const lessons = [];
-            const rows = document.querySelectorAll("table.grid tbody tr");
+            const days = ["Pn", "Wt", "Śr", "Czw", "Pt"];
 
-            rows.forEach((row) => {
-                const timeCell = row.querySelector("td.center");
-                const time = timeCell?.textContent?.trim();
+            document.querySelectorAll("table.decorated tbody tr").forEach((row) => {
+                const timeCell = row.querySelector("td:first-child");
+                const time = timeCell?.textContent?.trim() || "";
 
-                const lessonCells = row.querySelectorAll("td:not(.center)");
-                lessonCells.forEach((cell, dayIdx) => {
-                    const subject = cell
-                        .querySelector(".text")
-                        ?.textContent?.trim();
-                    const room = cell.querySelector(".classroom")?.textContent?.trim();
-
-                    if (subject) {
-                        const days = ["Pn", "Wt", "Śr", "Czw", "Pt"];
+                row.querySelectorAll("td:not(:first-child)").forEach((cell, idx) => {
+                    const text = cell.querySelector(".text, .lesson-subject")?.textContent?.trim();
+                    const room = cell.querySelector(".classroom, .room")?.textContent?.trim();
+                    if (text) {
                         lessons.push({
-                            day: days[dayIdx] || dayIdx.toString(),
-                            subject,
+                            day: days[idx] || idx.toString(),
+                            subject: text,
                             room: room || "-",
-                            time: time || "",
+                            time,
                         });
                     }
                 });
@@ -191,14 +174,11 @@ async function getTimetable(page) {
 
             return lessons;
         });
-
-        return timetable;
-    } catch (err) {
+    } catch {
         return [];
     }
 }
 
-// Główny endpoint
 app.post("/librus", async (req, res) => {
     const { login, pass } = req.body;
     if (!login || !pass)
@@ -208,7 +188,7 @@ app.post("/librus", async (req, res) => {
     try {
         browser = await chromium.launch({
             headless: true,
-            args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+            args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
         });
 
         const session = await loginToLibrus(browser, login, pass);
@@ -219,7 +199,6 @@ app.post("/librus", async (req, res) => {
 
         const { page } = session;
 
-        // Pobierz dane równolegle (sekwencyjnie by nie stracić sesji)
         const grades = await getGrades(page);
         const attendance = await getAttendance(page);
         const timetable = await getTimetable(page);
@@ -231,14 +210,12 @@ app.post("/librus", async (req, res) => {
             data: { grades, attendance, timetable },
         });
     } catch (err) {
-        if (browser) await browser.close();
-        console.error("Server error:", err);
-        return res
-            .status(500)
-            .json({ error: "Błąd serwera: " + (err.message || "nieznany") });
+        if (browser) await browser.close().catch(() => { });
+        console.error("Server error:", err.message);
+        return res.status(500).json({ error: "Błąd serwera: " + (err.message || "nieznany") });
     }
 });
 
-app.get("/health", (req, res) => res.json({ status: "ok" }));
+app.get("/health", (req, res) => res.json({ status: "ok", time: new Date().toISOString() }));
 
 app.listen(PORT, () => console.log(`Librus Proxy running on port ${PORT}`));
