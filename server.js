@@ -93,7 +93,7 @@ async function loginLibrus(login, pass) {
     Object.assign(cookies, step1.cookies);
     console.log("Step1 status:", step1.status, "cookies:", Object.keys(cookies));
 
-    // KROK 2: POST logowania z Referer (WYMAGANY od Nov 2025)
+    // KROK 2: POST logowania (Referer WYMAGANY od Nov 2025)
     const formData = `action=login&login=${encodeURIComponent(login)}&pass=${encodeURIComponent(pass)}`;
 
     const step2 = await httpsRequest({
@@ -103,47 +103,80 @@ async function loginLibrus(login, pass) {
     }, formData, cookies, "https://api.librus.pl/OAuth/Authorization?client_id=46&response_type=code&scope=mydata");
 
     Object.assign(cookies, step2.cookies);
-    console.log("Step2 status:", step2.status, "location:", step2.location, "body:", step2.body.substring(0, 200));
+    console.log("Step2 status:", step2.status, "body:", step2.body.substring(0, 200));
 
-    // Sprawdź czy OAuth zwrócił błąd logowania
-    if (step2.status === 200 && step2.body.includes("error")) {
-        throw new Error("invalid_credentials");
-    }
+    // Sprawdź czy logowanie powiodło się i co Librus każe zrobić dalej
+    let goTo = step2.location;
 
-    // KROK 3: Podążaj za redirectem do Synergii
-    let redirectPath = step2.location;
-    if (!redirectPath && step2.body.includes("code=")) {
-        const codeMatch = step2.body.match(/code=([^&"]+)/);
-        if (codeMatch) redirectPath = `/OAuth/AuthorizationCode?code=${codeMatch[1]}`;
-    }
-
-    if (redirectPath) {
-        const isAbsolute = redirectPath.startsWith("http");
-        const hostname = isAbsolute ? new URL(redirectPath).hostname : "synergia.librus.pl";
-        const path = isAbsolute ? new URL(redirectPath).pathname + new URL(redirectPath).search : redirectPath;
-
-        const step3 = await httpsRequest({
-            hostname,
-            path,
-            method: "GET"
-        }, null, cookies, `https://api.librus.pl${step2.location || ""}`);
-
-        Object.assign(cookies, step3.cookies);
-        console.log("Step3 status:", step3.status, "cookies now:", Object.keys(cookies));
-
-        // Jeśli kolejny redirect - idź dalej
-        if (step3.location) {
-            const step4 = await httpsRequest({
-                hostname: "synergia.librus.pl",
-                path: step3.location.startsWith("/") ? step3.location : new URL(step3.location).pathname + new URL(step3.location).search,
-                method: "GET"
-            }, null, cookies, `https://synergia.librus.pl${step3.location}`);
-            Object.assign(cookies, step4.cookies);
-            console.log("Step4 status:", step4.status, "cookies now:", Object.keys(cookies));
+    if (!goTo && step2.body) {
+        try {
+            const parsed = JSON.parse(step2.body);
+            if (parsed.status === "ok" && parsed.goTo) {
+                goTo = parsed.goTo; // np. "/OAuth/Authorization/2FA?client_id=46"
+            } else if (parsed.status === "error" || parsed.errors) {
+                throw new Error("invalid_credentials");
+            }
+        } catch (e) {
+            if (e.message === "invalid_credentials") throw e;
+            // Nie JSON - sprawdź body pod kątem błędu
+            if (step2.body.includes("error") || step2.body.includes("nieprawidłow")) {
+                throw new Error("invalid_credentials");
+            }
         }
     }
 
-    // Weryfikujemy czy mamy ciasteczka sesji Synergii
+    console.log("goTo:", goTo);
+
+    // KROK 3: Wywołaj endpoint goTo (2FA/consent/redirect) żeby dostać kod do Synergii
+    if (goTo) {
+        const path3 = goTo.startsWith("/") ? goTo : "/" + goTo.split("/").slice(3).join("/");
+
+        const step3 = await httpsRequest({
+            hostname: "api.librus.pl",
+            path: path3,
+            method: "GET"
+        }, null, cookies, "https://api.librus.pl/OAuth/Authorization/Grant?client_id=46");
+
+        Object.assign(cookies, step3.cookies);
+        console.log("Step3 status:", step3.status, "location:", step3.location, "body:", step3.body.substring(0, 200));
+
+        // Jeśli redirect do Synergii - podążaj
+        const redirectTarget = step3.location || (() => {
+            try {
+                const p = JSON.parse(step3.body);
+                return p.goTo || "";
+            } catch { return ""; }
+        })();
+
+        if (redirectTarget) {
+            const isAbsolute = redirectTarget.startsWith("http");
+            const host = isAbsolute ? new URL(redirectTarget).hostname : "synergia.librus.pl";
+            const path4 = isAbsolute
+                ? new URL(redirectTarget).pathname + new URL(redirectTarget).search
+                : redirectTarget;
+
+            const step4 = await httpsRequest({
+                hostname: host,
+                path: path4,
+                method: "GET"
+            }, null, cookies, `https://api.librus.pl${path3}`);
+
+            Object.assign(cookies, step4.cookies);
+            console.log("Step4 status:", step4.status, "cookies:", Object.keys(cookies));
+
+            // Ewentualny kolejny redirect
+            if (step4.location) {
+                const step5 = await httpsRequest({
+                    hostname: "synergia.librus.pl",
+                    path: step4.location.startsWith("/") ? step4.location : new URL(step4.location).pathname + new URL(step4.location).search,
+                    method: "GET"
+                }, null, cookies, `https://synergia.librus.pl`);
+                Object.assign(cookies, step5.cookies);
+                console.log("Step5 status:", step5.status, "cookies:", Object.keys(cookies));
+            }
+        }
+    }
+
     if (!cookies["DZIENNIKSID"] && !cookies["SDZIENNIKSID"]) {
         console.log("Brak ciasteczek Synergii. Dostępne:", Object.keys(cookies));
         throw new Error("no_session_cookies");
