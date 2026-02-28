@@ -63,32 +63,54 @@ function buildIdMap(items = []) {
  * @returns {Promise<Array>} Lista ocen [{subject, grade, category, weight, date, teacher}]
  */
 async function getGrades(client) {
-    // Równolegle pobieramy wszystkie potrzebne dane
-    const [gradesData, subjectsData, categoriesData] = await Promise.all([
+    // Równolegle pobieramy wszystkie potrzebne dane, dodając obsługę Ocen Punktowych (które TEB używa powszechnie)
+    const [gradesData, subjectsData, categoriesData, pointGradesData, pointCategoriesData] = await Promise.all([
         fetchResource(client, "/Grades"),
         fetchResource(client, "/Subjects"),
         fetchResource(client, "/Grades/Categories"),
+        fetchResource(client, "/PointGrades"),
+        fetchResource(client, "/PointGrades/Categories"),
     ]);
 
-    if (!gradesData?.Grades) return [];
-
     // Buduj mapy ID -> Nazwa
-    const subjectMap = buildIdMap(subjectsData?.Subjects);
-    const categoryMap = buildIdMap(categoriesData?.Categories);
+    const subjectMap = buildIdMap(subjectsData?.Subjects || []);
+    const categoryMap = buildIdMap(categoriesData?.Categories || []);
+    const pointCategoryMap = buildIdMap(pointCategoriesData?.Categories || pointCategoriesData?.PointGradesCategories || []);
 
-    // Rozwiąż ID i zwróć ustrukturyzowane dane
-    return gradesData.Grades.map((g) => ({
+    // 1. Zwykłe oceny (oraz oceny roczne/śródroczne w systemie punktowym)
+    const standardGrades = (gradesData?.Grades || []).map((g) => ({
         subject: subjectMap[g.Subject?.Id] || `Przedmiot #${g.Subject?.Id}`,
         grade: g.Grade,
         category: categoryMap[g.Category?.Id] || `Kategoria #${g.Category?.Id}`,
         weight: g.Weight ?? 1,
         date: g.Date,
         semester: g.Semester,
-        addedBy: g.AddedBy?.Id || null,
         isConstituent: g.IsConstituent ?? false,
         isSemestral: g.IsSemestral ?? false,
-        countToTheAverage: g.CountToTheAverage ?? true,
+        type: 'standard'
     }));
+
+    // 2. Oceny w systemie punktowym (Librus przechowuje je jako StudentPoints i MaxPoints np. 10/15)
+    const pointGrades = (pointGradesData?.PointGrades || []).map((g) => {
+        const studentPts = g.StudentPoints || 0;
+        const maxPts = g.MaxPoints || 0;
+        return {
+            subject: subjectMap[g.Subject?.Id] || `Przedmiot #${g.Subject?.Id}`,
+            grade: `${studentPts}/${maxPts}`,
+            category: pointCategoryMap[g.Category?.Id] || `Kategoria #${g.Category?.Id}`,
+            weight: g.Weight ?? 1,
+            date: g.Date,
+            semester: g.Semester,
+            points: studentPts,
+            maxPoints: maxPts,
+            isConstituent: true,
+            isSemestral: false,
+            type: 'point'
+        };
+    });
+
+    // Sklejamy obie tablice w jedną listę wszystkich wpisów.
+    return [...standardGrades, ...pointGrades];
 }
 
 /**
