@@ -1,7 +1,7 @@
 "use strict";
 const express = require("express");
 const cors = require("cors");
-const { chromium } = require("playwright");
+const https = require("https");
 
 const app = express();
 app.use(cors());
@@ -9,158 +9,228 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3001;
 
-async function loginToLibrus(browser, login, pass) {
-    const context = await browser.newContext({
-        userAgent:
-            "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-        viewport: { width: 390, height: 844 },
+// Helper: execute HTTPS request with cookies
+function httpsRequest(options, body, cookies) {
+    return new Promise((resolve, reject) => {
+        const cookieStr = Object.entries(cookies || {})
+            .map(([k, v]) => `${k}=${v}`).join("; ");
+
+        const reqOptions = {
+            ...options,
+            headers: {
+                "User-Agent": "Mozilla/5.0 (Windows NT x.y; Win64; x64; rv:10.0) Gecko/20100101 Firefox/10.0",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Cookie": cookieStr,
+                ...(options.headers || {})
+            }
+        };
+
+        const req = https.request(reqOptions, (res) => {
+            let data = "";
+            const setCookies = {};
+            (res.headers["set-cookie"] || []).forEach(c => {
+                const [kv] = c.split(";");
+                const [k, v] = kv.split("=");
+                if (k && v !== undefined) setCookies[k.trim()] = v.trim();
+            });
+            res.on("data", chunk => data += chunk);
+            res.on("end", () => resolve({
+                status: res.statusCode,
+                headers: res.headers,
+                cookies: setCookies,
+                body: data,
+                location: res.headers["location"] || ""
+            }));
+        });
+        req.on("error", reject);
+        if (body) req.write(body);
+        req.end();
     });
-    const page = await context.newPage();
-
-    try {
-        // URL logowania przez portal Librus Rodzina
-        await page.goto("https://portal.librus.pl/rodzina/synergia/loguj", {
-            waitUntil: "networkidle",
-            timeout: 30000,
-        });
-
-        // Formularz logowania jest w IFRAME - iterujemy przez wszystkie ramki
-        const frames = page.frames();
-        let loginFrame = null;
-
-        for (const frame of frames) {
-            try {
-                const el = await frame.$('input[id="Login"]') || await frame.$('input[name="Login"]');
-                if (el) {
-                    loginFrame = frame;
-                    break;
-                }
-            } catch (_) { }
-        }
-
-        if (loginFrame) {
-            // Wpisz dane w iframe
-            await loginFrame.fill('input[id="Login"]', login).catch(() =>
-                loginFrame.fill('input[name="Login"]', login)
-            );
-            await loginFrame.fill('input[id="Pass"]', pass).catch(() =>
-                loginFrame.fill('input[type="password"]', pass)
-            );
-            await Promise.all([
-                page.waitForNavigation({ timeout: 20000 }).catch(() => { }),
-                loginFrame.click('input[type="submit"], button[type="submit"]'),
-            ]);
-        } else {
-            // Fallback: formularz w głównym dokumencie
-            await page.waitForSelector('input[id="Login"], input[type="text"]', { timeout: 10000 });
-            await page.fill('input[id="Login"]', login).catch(() => page.fill('input[type="text"]', login));
-            await page.fill('input[id="Pass"]', pass).catch(() => page.fill('input[type="password"]', pass));
-            await Promise.all([
-                page.waitForNavigation({ timeout: 20000 }).catch(() => { }),
-                page.click('input[type="submit"], button[type="submit"]'),
-            ]);
-        }
-
-        await page.waitForTimeout(2000);
-
-        const url = page.url();
-        const content = await page.content();
-
-        if (
-            content.toLowerCase().includes("błędny") ||
-            content.toLowerCase().includes("nieprawidłowy") ||
-            content.includes("Podaj login") ||
-            (url.includes("loguj") && !url.includes("uczen"))
-        ) {
-            await context.close();
-            return null;
-        }
-
-        return { context, page };
-    } catch (err) {
-        await context.close();
-        throw err;
-    }
 }
 
-async function getGrades(page) {
-    try {
-        await page.goto("https://synergia.librus.pl/przegladaj_oceny/uczen", {
-            waitUntil: "domcontentloaded",
-            timeout: 20000,
-        });
+// Logowanie OAuth: GET Authorization → POST Grant → ciasteczka sesji
+async function loginLibrus(login, pass) {
+    let sessionCookies = {};
 
-        return await page.evaluate(() => {
-            const results = [];
-            document.querySelectorAll("table.decorated tbody tr").forEach((row) => {
-                const cells = row.querySelectorAll("td");
-                if (cells.length < 2) return;
-                const subject = cells[0]?.textContent?.trim();
-                if (!subject) return;
-                for (let i = 1; i < cells.length; i++) {
-                    cells[i].querySelectorAll("a").forEach((a) => {
-                        const grade = a.textContent?.trim();
-                        if (!grade) return;
-                        const title = a.getAttribute("title") || "";
-                        results.push({ subject, grade, desc: title.split(";")[0]?.trim() || "Ocena" });
-                    });
-                }
-            });
-            return results;
-        });
-    } catch (err) {
-        console.error("Grades error:", err.message);
-        return [];
+    // KROK 1: GET Authorization page - zdobądź ciasteczka i CSRF
+    const step1 = await httpsRequest({
+        hostname: "api.librus.pl",
+        path: "/OAuth/Authorization?client_id=46&response_type=code&scope=mydata",
+        method: "GET"
+    }, null, {});
+
+    Object.assign(sessionCookies, step1.cookies);
+
+    // KROK 2: POST Grant - zaloguj się
+    const formData = `action=login&login=${encodeURIComponent(login)}&pass=${encodeURIComponent(pass)}`;
+
+    const step2 = await httpsRequest({
+        hostname: "api.librus.pl",
+        path: "/OAuth/Authorization/Grant?client_id=46",
+        method: "POST",
+        headers: {
+            "Content-Length": Buffer.byteLength(formData),
+            "Referer": "https://api.librus.pl/OAuth/Authorization?client_id=46"
+        }
+    }, formData, sessionCookies);
+
+    Object.assign(sessionCookies, step2.cookies);
+
+    // Sprawdź czy zalogowanie się powiodło (powinno zwrócić redirect z kodem)
+    if (step2.status !== 302 && step2.status !== 200) {
+        throw new Error(`auth_failed:${step2.status}`);
     }
+
+    // Sprawdź czy body zawiera błąd
+    if (step2.body && (
+        step2.body.includes("Błędny login lub hasło") ||
+        step2.body.includes("error") && step2.body.includes("invalid")
+    )) {
+        throw new Error("invalid_credentials");
+    }
+
+    // KROK 3: Pobierz redirect URL z kodu autoryzacji i zdobądź ciasteczka Synergii
+    const redirectUrl = step2.location || step2.headers?.["location"] || "";
+    if (redirectUrl && redirectUrl.includes("?code=")) {
+        const url = new URL(redirectUrl.startsWith("http") ? redirectUrl : `https://synergia.librus.pl${redirectUrl}`);
+        const step3 = await httpsRequest({
+            hostname: "synergia.librus.pl",
+            path: url.pathname + url.search,
+            method: "GET"
+        }, null, sessionCookies);
+        Object.assign(sessionCookies, step3.cookies);
+    }
+
+    // Sprawdź czy mamy ciasteczka sesji Synergii
+    if (!sessionCookies["DZIENNIKSID"] && !sessionCookies["SDZIENNIKSID"]) {
+        // Spróbuj bezpośrednio strony Synergii
+        const directLogin = await httpsRequest({
+            hostname: "synergia.librus.pl",
+            path: "/loguj",
+            method: "POST",
+            headers: { "Content-Length": Buffer.byteLength(`login=${encodeURIComponent(login)}&pass=${encodeURIComponent(pass)}`) }
+        }, `login=${encodeURIComponent(login)}&pass=${encodeURIComponent(pass)}`, sessionCookies);
+        Object.assign(sessionCookies, directLogin.cookies);
+    }
+
+    return sessionCookies;
 }
 
-async function getAttendance(page) {
-    try {
-        await page.goto("https://synergia.librus.pl/przegladaj_nb/uczen", {
-            waitUntil: "domcontentloaded",
-            timeout: 20000,
-        });
+// Pobieranie strony z sesją Synergii 
+async function fetchSynergiaPage(path, cookies) {
+    const response = await httpsRequest({
+        hostname: "synergia.librus.pl",
+        path: path,
+        method: "GET"
+    }, null, cookies);
 
-        return await page.evaluate(() => {
-            const text = document.body.innerText;
-            const percentMatch = text.match(/(\d+[,.]?\d*)\s*%/);
-            const percent = percentMatch ? parseFloat(percentMatch[1].replace(",", ".")) : 0;
-            let unexcused = 0, excused = 0, late = 0;
-            document.querySelectorAll("td").forEach((td) => {
-                const t = td.textContent?.trim().toLowerCase();
-                if (t === "nb" || t === "u") unexcused++;
-                else if (t === "nb_u" || t === "us") excused++;
-                else if (t === "sp") late++;
-            });
-            return { presence_percentage: percent, unexcused, excused, late };
-        });
-    } catch {
-        return { presence_percentage: 0, unexcused: 0, excused: 0, late: 0 };
+    if (response.status === 302) {
+        // Nieautoryzowany - sesja wygasła
+        throw new Error("session_expired");
     }
+
+    return response.body;
 }
 
-async function getTimetable(page) {
-    try {
-        await page.goto("https://synergia.librus.pl/przegladaj_plan_lekcji", {
-            waitUntil: "domcontentloaded",
-            timeout: 20000,
-        });
+// Parsowanie ocen z HTML
+function parseGrades(html) {
+    const grades = [];
+    if (!html) return grades;
 
-        return await page.evaluate(() => {
-            const lessons = [];
-            const days = ["Pn", "Wt", "Śr", "Czw", "Pt"];
-            document.querySelectorAll("table.decorated tbody tr").forEach((row) => {
-                const time = row.querySelector("td:first-child")?.textContent?.trim() || "";
-                row.querySelectorAll("td:not(:first-child)").forEach((cell, idx) => {
-                    const text = cell.querySelector(".text, .lesson-subject")?.textContent?.trim();
-                    const room = cell.querySelector(".classroom, .room")?.textContent?.trim();
-                    if (text) lessons.push({ day: days[idx] || idx.toString(), subject: text, room: room || "-", time });
+    // Tabela z klasą "decorated" zawiera oceny  
+    const tableMatch = html.match(/<table[^>]*class="[^"]*decorated[^"]*"[^>]*>([\s\S]*?)<\/table>/i);
+    if (!tableMatch) return grades;
+
+    const tbody = tableMatch[1];
+    const rows = tbody.match(/<tr[^>]*>([\s\S]*?)<\/tr>/gi) || [];
+
+    rows.forEach(row => {
+        const cells = row.match(/<td[^>]*>([\s\S]*?)<\/td>/gi) || [];
+        if (cells.length < 2) return;
+
+        const subject = cells[0].replace(/<[^>]+>/g, "").trim();
+        if (!subject || subject.length < 2) return;
+
+        // Poszukaj linków z ocenami (class="grade-box" lub tytuł w title=)
+        const gradeLinks = row.match(/<a[^>]*title="([^"]*)"[^>]*>([^<]*)<\/a>/gi) || [];
+        gradeLinks.forEach(link => {
+            const titleMatch = link.match(/title="([^"]*)"/);
+            const gradeMatch = link.match(/>([^<]+)<\/a>/);
+            const grade = gradeMatch?.[1]?.trim();
+            const desc = titleMatch?.[1]?.split(";")?.[0]?.trim() || "Ocena";
+            if (grade && grade.length > 0 && grade !== " ") {
+                grades.push({ subject, grade, desc });
+            }
+        });
+    });
+
+    return grades;
+}
+
+// Parsowanie frekwencji z HTML
+function parseAttendance(html) {
+    if (!html) return { presence_percentage: 0, unexcused: 0, excused: 0, late: 0 };
+
+    const percentMatch = html.match(/(\d+[,.]?\d*)\s*%/);
+    const percent = percentMatch ? parseFloat(percentMatch[1].replace(",", ".")) : 0;
+
+    let unexcused = 0, excused = 0, late = 0;
+    const cells = html.match(/<td[^>]*>([^<]*)<\/td>/gi) || [];
+    cells.forEach(cell => {
+        const t = cell.replace(/<[^>]+>/g, "").trim().toLowerCase();
+        if (t === "nb" || t === "u") unexcused++;
+        else if (t === "nb_u" || t === "us" || t === "uw") excused++;
+        else if (t === "sp") late++;
+    });
+
+    return { presence_percentage: percent, unexcused, excused, late };
+}
+
+// Parsowanie planu lekcji z HTML
+function parseTimetable(html) {
+    if (!html) return [];
+    const lessons = [];
+    const days = ["Pn", "Wt", "Śr", "Czw", "Pt"];
+
+    const rows = html.match(/<tr[^>]*>([\s\S]*?)<\/tr>/gi) || [];
+    rows.forEach(row => {
+        const cells = row.match(/<td[^>]*>([\s\S]*?)<\/td>/gi) || [];
+        if (cells.length < 2) return;
+
+        const timeCell = cells[0].replace(/<[^>]+>/g, "").trim();
+
+        cells.slice(1).forEach((cell, idx) => {
+            // Szukaj tekstu lekcji - zazwyczaj w divie
+            const textMatch = cell.match(/class="text"[^>]*>([^<]+)/i) ||
+                cell.match(/class="lesson"[^>]*>([^<]+)/i);
+            const roomMatch = cell.match(/class="classroom"[^>]*>([^<]+)/i) ||
+                cell.match(/class="room"[^>]*>([^<]+)/i);
+
+            const subject = textMatch?.[1]?.trim();
+            const room = roomMatch?.[1]?.trim() || "-";
+
+            if (subject && idx < 5) {
+                lessons.push({
+                    day: days[idx],
+                    subject,
+                    room,
+                    time: timeCell
                 });
-            });
-            return lessons;
+            }
         });
+    });
+
+    return lessons;
+}
+
+// Weryfikacja sesji po logowaniu
+async function verifySession(cookies) {
+    try {
+        const html = await fetchSynergiaPage("/uczen/index", cookies);
+        // Sprawdź czy strona zawiera elementy logowanego użytkownika
+        return !html.includes("loguj") && html.length > 1000;
     } catch {
-        return [];
+        return false;
     }
 }
 
@@ -168,33 +238,46 @@ app.post("/librus", async (req, res) => {
     const { login, pass } = req.body;
     if (!login || !pass) return res.status(400).json({ error: "Brak danych logowania." });
 
-    let browser;
     try {
-        browser = await chromium.launch({
-            headless: true,
-            args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-        });
-
-        const session = await loginToLibrus(browser, login, pass);
-        if (!session) {
-            await browser.close();
-            return res.status(401).json({ error: "Nieprawidłowy login lub hasło." });
+        // Zaloguj się przez OAuth API
+        let sessionCookies;
+        try {
+            sessionCookies = await loginLibrus(login, pass);
+        } catch (err) {
+            if (err.message.includes("invalid_credentials") || err.message.includes("auth_failed")) {
+                return res.status(401).json({ error: "Nieprawidłowy login lub hasło Synergia." });
+            }
+            throw err;
         }
 
-        const { page } = session;
-        const grades = await getGrades(page);
-        const attendance = await getAttendance(page);
-        const timetable = await getTimetable(page);
-        await browser.close();
+        // Zweryfikuj sesję
+        const isValid = await verifySession(sessionCookies);
+        if (!isValid) {
+            return res.status(401).json({ error: "Nie udało się zalogować do Synergii. Sprawdź dane." });
+        }
 
-        return res.json({ status: "success", data: { grades, attendance, timetable } });
+        // Pobierz dane równolegle
+        const [gradesHtml, attendanceHtml, timetableHtml] = await Promise.allSettled([
+            fetchSynergiaPage("/przegladaj_oceny/uczen", sessionCookies),
+            fetchSynergiaPage("/przegladaj_nb/uczen", sessionCookies),
+            fetchSynergiaPage("/przegladaj_plan_lekcji", sessionCookies)
+        ]);
+
+        const grades = gradesHtml.status === "fulfilled" ? parseGrades(gradesHtml.value) : [];
+        const attendance = attendanceHtml.status === "fulfilled" ? parseAttendance(attendanceHtml.value) : { presence_percentage: 0 };
+        const timetable = timetableHtml.status === "fulfilled" ? parseTimetable(timetableHtml.value) : [];
+
+        return res.json({
+            status: "success",
+            data: { grades, attendance, timetable }
+        });
+
     } catch (err) {
-        if (browser) await browser.close().catch(() => { });
-        console.error("Server error:", err.message);
+        console.error("Error:", err.message);
         return res.status(500).json({ error: "Błąd serwera: " + (err.message || "nieznany") });
     }
 });
 
 app.get("/health", (req, res) => res.json({ status: "ok", time: new Date().toISOString() }));
 
-app.listen(PORT, () => console.log(`Librus Proxy running on port ${PORT}`));
+app.listen(PORT, () => console.log(`Librus OAuth Proxy running on port ${PORT}`));
