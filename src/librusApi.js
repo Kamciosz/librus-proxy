@@ -117,12 +117,11 @@ async function getGrades(client) {
 
     // 3. HYBRYDOWY SCRAPER HTML dla "Ocen Punktowych" na wypadek twardej blokady po stronie nowej bramki API (TEB Edukacja)
     let extraHtmlPointGrades = [];
-    let htmlDump = "";
     try {
         const cheerio = require('cheerio');
-        const pointHtmlResponse = await client.get('https://synergia.librus.pl/przegladaj_oceny_punktowe/uczen');
+        // Portal ukrył dedykowaną podstronę - ułamki renderowane są obok zwykłych ocen
+        const pointHtmlResponse = await client.get('https://synergia.librus.pl/przegladaj_oceny/uczen');
         const $ = cheerio.load(pointHtmlResponse.data);
-        htmlDump = pointHtmlResponse.data.substring(0, 500) + "\n\nTABLE_DUMP:\n" + $('table').first().html(); // dla diagnostyki dlaczego puste
 
         // Zwykle w Librus oceny to tabele, przedmioty sa w 2 komórce tr.line0, tr.line1
         $('table tr').each((i, row) => {
@@ -135,16 +134,21 @@ async function getGrades(client) {
                     const gradeText = $(aTag).text().trim(); // Np. 10/10
                     if (possibleSubject && gradeText && gradeText.includes('/')) {
                         let cat = $(aTag).attr('title') || 'Wpis punktowy';
-                        cat = cat.replace(/<[^>]*>?/gm, ' '); // usun ewentualne ukryte HTML
-                        cat = cat.split('<br')[0].trim(); // czysty tytul kategorii
+
+                        // Parsowanie "Kategoria: Test z sieci<br>Data: ..."
+                        if (cat.includes('Kategoria:')) {
+                            cat = cat.split('Kategoria:')[1].split('<br')[0].trim();
+                        } else {
+                            cat = cat.replace(/<[^>]*>?/gm, ' ').split('<br')[0].trim();
+                        }
 
                         extraHtmlPointGrades.push({
                             subject: possibleSubject,
                             grade: gradeText,
                             category: cat,
-                            weight: 1,
-                            date: new Date().toISOString().split('T')[0], // zastępnik daty - system punktowy czesto nie podaje daty jawnie z html list
-                            semester: 1,
+                            weight: 1, // Punktowych raczej nie ważymy w v2
+                            date: new Date().toISOString().split('T')[0], // zastępnik daty
+                            semester: 1, // heurystyka domyslna
                             type: 'point_html_scraped'
                         });
                     }
