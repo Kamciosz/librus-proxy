@@ -187,8 +187,7 @@ async function getGrades(client) {
         debug_standard: gradesData?.Grades || [],
         debug_point: pointGradesData?.PointGrades || [],
         debug_text: textGradesData || null,
-        debug_descriptive: descriptiveGradesData || null,
-        debug_html_dump: htmlDump
+        debug_descriptive: descriptiveGradesData || null
     };
 }
 
