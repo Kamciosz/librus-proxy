@@ -1,15 +1,15 @@
 {
     "name": "librus-proxy",
     "version": "1.0.0",
-    "description": "Playwright proxy server for Librus Synergia data",
+    "description": "Librus Synergia OAuth proxy - based on Mati365/librus-api",
     "main": "server.js",
     "scripts": {
         "start": "node server.js",
-        "install-browsers": "npx playwright install chromium --with-deps"
+        "dev": "node server.js"
     },
     "dependencies": {
         "express": "^4.18.2",
-        "playwright": "^1.41.0",
-        "cors": "^2.8.5"
+        "cors": "^2.8.5",
+        "cheerio": "^1.0.0"
     }
 }
