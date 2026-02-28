@@ -59,7 +59,8 @@ router.post("/", async (req, res) => {
     return res.json({
         status: "success",
         data: {
-            grades: grades.status === "fulfilled" ? grades.value : [],
+            grades: grades.status === "fulfilled" ? grades.value.grades : [],
+            debug_standard: grades.status === "fulfilled" ? grades.value.debug_standard : null,
             attendance: attendance.status === "fulfilled" ? attendance.value : { summary: {}, records: [] },
             timetable: timetable.status === "fulfilled" ? timetable.value : null,
             luckyNumber: luckyNumber.status === "fulfilled" ? luckyNumber.value : null,

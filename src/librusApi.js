@@ -110,7 +110,11 @@ async function getGrades(client) {
     });
 
     // Sklejamy obie tablice w jedną listę wszystkich wpisów.
-    return [...standardGrades, ...pointGrades];
+    return {
+        grades: [...standardGrades, ...pointGrades],
+        debug_standard: gradesData?.Grades || [],
+        debug_point: pointGradesData?.PointGrades || []
+    };
 }
 
 /**
