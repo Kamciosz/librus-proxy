@@ -239,14 +239,146 @@ async function getAttendance(client) {
 }
 
 /**
- * Pobiera plan lekcji na aktualny tydzień.
+ * Pobiera plan lekcji przez scraping HTML strony Librusa.
  * 
- * @param {import("axios").AxiosInstance} client
- * @returns {Promise<Object>} Plan lekcji z API (surowy, do przetwarzania przez frontend)
+ * Zamiast REST API (które nie zwraca nazw sal), scrapeujemy
+ * https://synergia.librus.pl/przegladaj_plan_lekcji
+ * 
+ * HTML zawiera: numery lekcji, godziny, nazwy sal (s. 226), nauczyciela
+ * Format komórki: "Przedmiot\n-Nauczyciel s. 226"
+ * 
+ * @param {import("axios").AxiosInstance} client - pełny klient z cookies Librusa
+ * @returns {Promise<Object>} { "2026-03-02": [{lessonNo, time, subject, teacher, room}] }
  */
 async function getTimetable(client) {
-    const data = await fetchResource(client, "/Timetables");
-    return data?.Timetable || null;
+    const cheerio = require('cheerio');
+    const result = {};
+
+    try {
+        const resp = await client.get('https://synergia.librus.pl/przegladaj_plan_lekcji');
+        const $ = cheerio.load(resp.data);
+
+        // Tabela planu ma nagłówki z datami (Poniedziałek 2026-03-02 itd.)
+        // Pierwsza kolumna = Nr lekcji, druga = Godziny, potem Pon-Pt, Sob, Nd
+        const dateMap = {}; // kolumna_index -> "2026-03-02"
+
+        // Szukamy nagłówków kolumn - zawierają datę w formacie YYYY-MM-DD lub tekst "Poniedziałek 2026-03-02"
+        $('table.decorated thead tr').first().find('th').each((colIdx, th) => {
+            const txt = $(th).text().trim();
+            // Szukamy daty YYYY-MM-DD lub słów Poniedziałek/Wtorek/... + daty
+            const dateMatch = txt.match(/(\d{4}-\d{2}-\d{2})/);
+            if (dateMatch) {
+                dateMap[colIdx] = dateMatch[1];
+                result[dateMatch[1]] = [];
+            }
+        });
+
+        // Jeśli nie znaleźliśmy dat w nagłówku, spróbuj alternatywnego selektora
+        if (Object.keys(dateMap).length === 0) {
+            $('table.decorated tr').first().find('td, th').each((colIdx, cell) => {
+                const txt = $(cell).text().trim();
+                const dateMatch = txt.match(/(\d{4}-\d{2}-\d{2})/);
+                if (dateMatch) {
+                    dateMap[colIdx] = dateMatch[1];
+                    result[dateMatch[1]] = [];
+                }
+            });
+        }
+
+        // Godziny lekcji - szukamy w wierszach
+        const lessonTimes = {}; // lessonNo -> "08:00-08:45"
+
+        // Parsuj wiersze lekcji
+        $('table.decorated tbody tr, table.decorated tr').each((rowIdx, row) => {
+            const cells = $(row).find('td');
+            if (cells.length < 3) return;
+
+            // Kolumna 0: numer lekcji (0-12)
+            const lessonNoText = $(cells[0]).text().trim();
+            const lessonNo = parseInt(lessonNoText);
+            if (isNaN(lessonNo)) return;
+
+            // Kolumna 1: godziny (08:00 - 08:45 lub 08:00\n08:45)
+            const timeText = $(cells[1]).text().replace(/\s+/g, ' ').trim();
+            const timeMatch = timeText.match(/(\d{2}:\d{2})[^\d]+(\d{2}:\d{2})/);
+            const timeStr = timeMatch ? `${timeMatch[1]} – ${timeMatch[2]}` : timeText;
+
+            // Kolumny 2+: przedmioty per dzień
+            cells.each((cellIdx, cell) => {
+                if (cellIdx < 2) return; // Pomiń nr lekcji i godziny
+
+                const dateKey = dateMap[cellIdx];
+                if (!dateKey) return;
+
+                // Szukaj bloków lekcji (może być kilka grup w jednej komórce)
+                const cellHtml = $(cell).html() || '';
+                const cellText = $(cell).text().trim();
+                if (!cellText) return;
+
+                // Format: "Przedmiot\n-Nauczyciel s. Sala" lub divki
+                // Próbuj parsować każdy blok (gdy są dwie grupy, dzielone przez <br> lub div)
+                const blocks = [];
+
+                // Szukaj divów lub paragrafów z lekcjami
+                const innerDivs = $(cell).find('div, p');
+                if (innerDivs.length > 0) {
+                    innerDivs.each((_, div) => {
+                        const text = $(div).text().trim();
+                        if (text.length > 3) blocks.push(text);
+                    });
+                } else {
+                    // Podziel po <br> lub po znaku nowej linii
+                    const lines = cellText.split(/\n/).map(l => l.trim()).filter(Boolean);
+                    if (lines.length >= 1) blocks.push(lines.join('\n'));
+                }
+
+                // Parsuj każdy blok: "Przedmiot\n-Nauczyciel s. 226"
+                for (const block of blocks) {
+                    if (!block || block.length < 3) continue;
+
+                    const lines = block.split(/\n/).map(l => l.trim()).filter(Boolean);
+                    const subject = lines[0] || '';
+                    let teacher = '';
+                    let room = '';
+
+                    // Linia nauczyciel+sala: "-Mika Mariusz s. 210" lub "Mika Mariusz s. 210"
+                    for (let i = 1; i < lines.length; i++) {
+                        const line = lines[i].replace(/^-/, '').trim();
+                        const roomMatch = line.match(/^(.+?)\s+s\.\s+(\S+)/);
+                        if (roomMatch) {
+                            teacher = roomMatch[1].trim();
+                            room = `s. ${roomMatch[2]}`;
+                        } else if (line.length > 2) {
+                            teacher = line;
+                        }
+                    }
+
+                    if (subject) {
+                        if (!result[dateKey]) result[dateKey] = [];
+                        result[dateKey].push({
+                            lessonNo,
+                            time: timeStr,
+                            subject,
+                            teacher,
+                            room,
+                            isCancelled: false,
+                            isSubstitution: false,
+                        });
+                    }
+                }
+            });
+        });
+
+        // Posortuj lekcje w każdym dniu po numerze lekcji
+        for (const dateKey of Object.keys(result)) {
+            result[dateKey].sort((a, b) => a.lessonNo - b.lessonNo);
+        }
+
+    } catch (err) {
+        console.error('[getTimetable HTML] Scraping failed:', err.message);
+    }
+
+    return Object.keys(result).length > 0 ? result : null;
 }
 
 /**
