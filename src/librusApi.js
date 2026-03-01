@@ -211,10 +211,11 @@ async function getGrades(client) {
  * @returns {Promise<Object>} Podsumowanie frekwencji
  */
 async function getAttendance(client) {
-    const [attendancesData, typesData, subjectsData] = await Promise.all([
+    const [attendancesData, typesData, subjectsData, lessonsData] = await Promise.all([
         fetchResource(client, "/Attendances"),
         fetchResource(client, "/Attendances/Types"),
         fetchResource(client, "/Subjects"),
+        fetchResource(client, "/Lessons"),
     ]);
 
     if (!attendancesData?.Attendances) {
@@ -223,11 +224,23 @@ async function getAttendance(client) {
 
     const typeMap = buildIdMap(typesData?.Types || []);
     const subjectMap = buildIdMap(subjectsData?.Subjects || []);
+
+    // Mapowanie relacji Lekcja -> Przedmiot 
+    const lessonMap = {};
+    (lessonsData?.Lessons || []).forEach(l => {
+        if (l.Id && l.Subject?.Id) {
+            lessonMap[l.Id] = l.Subject.Id;
+        }
+    });
+
     const summary = {};
 
     const records = attendancesData.Attendances.map((a) => {
         const typeName = typeMap[a.Type?.Id] || "Nieznany";
-        const subjectName = a.Subject?.Id ? (subjectMap[a.Subject.Id] || "Nieznany") : "Inne";
+
+        // Wyciąganie Id Przedmiotu
+        const subjectId = (a.Lesson?.Id ? lessonMap[a.Lesson.Id] : null) || a.Subject?.Id;
+        const subjectName = subjectId ? (subjectMap[subjectId] || "Nieznany") : "Inne";
 
         // Zlicz per typ
         summary[typeName] = (summary[typeName] || 0) + 1;
