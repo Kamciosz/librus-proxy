@@ -140,26 +140,35 @@ async function getGrades(client) {
                     });
 
                     if (possibleSubject) {
-                        let cat = $(aTag).attr('title') || 'Wpis punktowy';
+                        const rawTitle = $(aTag).attr('title') || 'Wpis punktowy';
 
-                        // Parsowanie "Kategoria: Test z sieci<br>Data: ..."
-                        if (cat.includes('Kategoria:')) {
-                            cat = cat.split('Kategoria:')[1].split('<br')[0].trim();
-                        } else {
-                            cat = cat.replace(/<[^>]*>?/gm, ' ').split('<br')[0].trim();
+                        // Wyciągnij kategorię z "Kategoria: Test<br>Data: ..."
+                        let cat = 'Wpis punktowy';
+                        if (rawTitle.includes('Kategoria:')) {
+                            cat = rawTitle.split('Kategoria:')[1].split('<br')[0].trim();
+                        }
+
+                        // Wyciągnij datę: "Data: 2025-10-16"
+                        const dateMatch = rawTitle.match(/Data:\s*(\d{4}-\d{2}-\d{2})/);
+                        const gradeDate = dateMatch ? dateMatch[1] : null;
+
+                        // Semestr: styczeń-czerwiec = 2, wrzesień-grudzień = 1
+                        let semester = 1;
+                        if (gradeDate) {
+                            const month = parseInt(gradeDate.split('-')[1]);
+                            semester = month >= 1 && month <= 6 ? 2 : 1;
                         }
 
                         extraHtmlPointGrades.push({
                             subject: possibleSubject,
                             grade: gradeText,
                             category: cat,
-                            weight: 1, // Punktowych raczej nie ważymy w v2
-                            date: new Date().toISOString().split('T')[0], // zastępnik daty
-                            semester: 1, // heurystyka domyslna
+                            weight: 1,
+                            date: gradeDate,
+                            semester,
                             type: 'point_html_scraped'
                         });
                     }
-                }
             });
         });
     } catch (err) {
