@@ -169,6 +169,7 @@ async function getGrades(client) {
                             type: 'point_html_scraped'
                         });
                     }
+                }
             });
         });
     } catch (err) {
