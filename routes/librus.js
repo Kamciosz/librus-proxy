@@ -27,7 +27,7 @@ const router = Router();
  * Zwraca: { status: "success", data: { grades, attendance, timetable, luckyNumber, user } }
  */
 router.post("/", async (req, res) => {
-    const { login, pass } = req.body;
+    const { login, pass, weekStart, onlyTimetable } = req.body;
 
     if (!login || !pass) {
         return res.status(400).json({ error: "Brak danych logowania (login, pass)." });
@@ -47,11 +47,27 @@ router.post("/", async (req, res) => {
         return res.status(500).json({ error: "Błąd uwierzytelniania: " + err.message });
     }
 
+    // Jeśli chcemy TYLKO plan lekcji z pominięciem reszty np. ocen:
+    if (onlyTimetable) {
+        try {
+            const timetable = await getTimetable(client, weekStart);
+            return res.json({
+                status: "success",
+                data: {
+                    timetable: timetable,
+                }
+            });
+        } catch (err) {
+            console.error("[Route /librus] Timetable fetch error:", err.message);
+            return res.status(500).json({ error: "Błąd pobierania planu zajęć: " + err.message });
+        }
+    }
+
     // Pobierz wszystkie dane równolegle (szybciej niż sekwencyjnie)
     const [grades, attendance, timetable, luckyNumber, user] = await Promise.allSettled([
         getGrades(client),
         getAttendance(client),
-        getTimetable(client),
+        getTimetable(client, weekStart),
         getLuckyNumber(client),
         getMe(client),
     ]);
