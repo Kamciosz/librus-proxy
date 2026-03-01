@@ -211,9 +211,10 @@ async function getGrades(client) {
  * @returns {Promise<Object>} Podsumowanie frekwencji
  */
 async function getAttendance(client) {
-    const [attendancesData, typesData] = await Promise.all([
+    const [attendancesData, typesData, subjectsData] = await Promise.all([
         fetchResource(client, "/Attendances"),
         fetchResource(client, "/Attendances/Types"),
+        fetchResource(client, "/Subjects"),
     ]);
 
     if (!attendancesData?.Attendances) {
@@ -221,17 +222,24 @@ async function getAttendance(client) {
     }
 
     const typeMap = buildIdMap(typesData?.Types || []);
+    const subjectMap = buildIdMap(subjectsData?.Subjects || []);
     const summary = {};
 
     const records = attendancesData.Attendances.map((a) => {
         const typeName = typeMap[a.Type?.Id] || "Nieznany";
+        const subjectName = a.Subject?.Id ? (subjectMap[a.Subject.Id] || "Nieznany") : "Inne";
+
         // Zlicz per typ
         summary[typeName] = (summary[typeName] || 0) + 1;
+
         return {
             type: typeName,
             typeId: a.Type?.Id,
             date: a.Date,
             lessonNo: a.LessonNo,
+            subject: subjectName,
+            semester: a.Semester,
+            _raw: a
         };
     });
 
