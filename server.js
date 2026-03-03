@@ -12,11 +12,10 @@
  *  POST /librus  { login, pass }  → dane ucznia (oceny, frekwencja, plan lekcji)
  *  GET  /health                   → status serwera
  */
-"use strict";
 
-const express = require("express");
-const cors = require("cors");
-const librusRouter = require("./routes/librus");
+import express from "express";
+import cors from "cors";
+import librusRouter from "./routes/librus.js";
 
 const app = express();
 const PORT = process.env.PORT || 3001;

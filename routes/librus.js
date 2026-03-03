@@ -11,12 +11,11 @@
  *  - 401: błędne dane logowania (INVALID_CREDENTIALS)
  *  - 500: nieoczekiwany błąd serwera
  */
-"use strict";
 
-const { Router } = require("express");
-const { createClient } = require("../src/createClient");
-const { authenticate } = require("../src/auth");
-const { getGrades, getAttendance, getTimetable, getLuckyNumber, getMe } = require("../src/librusApi");
+import { Router } from "express";
+import { createClient } from "../src/createClient.js";
+import { authenticate } from "../src/auth.js";
+import { getGrades, getAttendance, getTimetable, getLuckyNumber, getMe } from "../src/librusApi.js";
 
 const router = Router();
 
@@ -88,4 +87,4 @@ router.post("/", async (req, res) => {
     });
 });
 
-module.exports = router;
+export default router;

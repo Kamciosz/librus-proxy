@@ -2,30 +2,19 @@
  * librusApi.js
  * 
  * Wszystkie wywołania REST API Librus Synergia.
- * Bazowy URL: https://synergia.librus.pl/gateway/api/2.0
- * 
- * WAŻNA UWAGA o strukturze danych:
- * Endpoints /Grades i /Attendances zwracają TYLKO referencje przez ID:
- *   - grade.Subject = {Id: 42}  (nie nazwa!)
- *   - grade.Category = {Id: 7}  (nie nazwa!)
- * Dlatego trzeba równolegle pobrać /Subjects i /Grades/Categories
- * i połączyć dane (tzw. "resolve IDs").
- * 
- * Wzorowane na: kbaraniak/librus-api-rewrited
  */
-"use strict";
 
-const { GATEWAY_BASE } = require("./auth");
+import { GATEWAY_BASE } from "./auth.js";
+import * as cheerio from 'cheerio';
 
 /**
  * Pobiera zasób z gateway API.
- * Zwraca null zamiast rzucać błąd gdy szkoła nie wspiera endpointu.
  * 
  * @param {import("axios").AxiosInstance} client
  * @param {string} path - ścieżka bez base URL, np. "/Grades"
  * @returns {Promise<object|null>}
  */
-async function fetchResource(client, path) {
+export async function fetchResource(client, path) {
     try {
         const response = await client.get(`${GATEWAY_BASE}${path}`);
         return response.data;
@@ -38,10 +27,6 @@ async function fetchResource(client, path) {
 
 /**
  * Buduje mapę {Id -> Nazwa} z listy zasobów.
- * Używane do rozwiązywania referencji ID w ocenach i frekwencji.
- * 
- * @param {Array} items - lista obiektów z polem Id i Name/Short
- * @returns {Object} mapa {id: name}
  */
 function buildIdMap(items = []) {
     const map = {};
@@ -55,15 +40,9 @@ function buildIdMap(items = []) {
 
 /**
  * Pobiera i przetwarza oceny. 
- * 
- * Pobiera równolegle: /Grades, /Subjects, /Grades/Categories
- * Łączy ID z nazwami żeby UI dostał czytelne dane.
- * 
- * @param {import("axios").AxiosInstance} client
- * @returns {Promise<Array>} Lista ocen [{subject, grade, category, weight, date, teacher}]
  */
-async function getGrades(client) {
-    // Równolegle pobieramy wszystkie potrzebne dane, dodając obsługę Ocen Punktowych i Tekstowych z API
+export async function getGrades(client) {
+    // Równolegle pobieramy wszystkie potrzebne dane
     const [
         gradesData, subjectsData, categoriesData,
         pointGradesData, pointCategoriesData,
@@ -96,7 +75,7 @@ async function getGrades(client) {
         type: 'standard'
     }));
 
-    // 2. Oceny w systemie punktowym przez REST API (czasem to działa)
+    // 2. Oceny w systemie punktowym przez REST API
     const pointGrades = (pointGradesData?.PointGrades || []).map((g) => {
         const studentPts = g.StudentPoints || 0;
         const maxPts = g.MaxPoints || 0;
@@ -115,22 +94,16 @@ async function getGrades(client) {
         };
     });
 
-    // 3. HYBRYDOWY SCRAPER HTML dla "Ocen Punktowych" na wypadek twardej blokady po stronie nowej bramki API (TEB Edukacja)
+    // 3. HYBRYDOWY SCRAPER HTML dla "Ocen Punktowych"
     let extraHtmlPointGrades = [];
     try {
-        const cheerio = require('cheerio');
-        // Portal ukrył dedykowaną podstronę - ułamki renderowane są obok zwykłych ocen
         const pointHtmlResponse = await client.get('https://synergia.librus.pl/przegladaj_oceny/uczen');
         const $ = cheerio.load(pointHtmlResponse.data);
 
-        // Zwykle w Librus oceny to tabele, przedmioty sa w 2 komórce tr.line0, tr.line1
         $('table tr').each((i, row) => {
-            // Szukamy a w class="grade-box" 
             $(row).find('.grade-box a').each((_, aTag) => {
                 const gradeText = $(aTag).text().trim(); // Np. 10/10
                 if (gradeText && gradeText.includes('/')) {
-
-                    // Bezpieczne znajdowanie przedmiotu - pierwszy nie-linkowy td zawierający tekst
                     let possibleSubject = '';
                     $(row).find('td').each((j, td) => {
                         const txt = $(td).text().trim();
@@ -141,18 +114,13 @@ async function getGrades(client) {
 
                     if (possibleSubject) {
                         const rawTitle = $(aTag).attr('title') || 'Wpis punktowy';
-
-                        // Wyciągnij kategorię z "Kategoria: Test<br>Data: ..."
                         let cat = 'Wpis punktowy';
                         if (rawTitle.includes('Kategoria:')) {
                             cat = rawTitle.split('Kategoria:')[1].split('<br')[0].trim();
                         }
-
-                        // Wyciągnij datę: "Data: 2025-10-16"
                         const dateMatch = rawTitle.match(/Data:\s*(\d{4}-\d{2}-\d{2})/);
                         const gradeDate = dateMatch ? dateMatch[1] : null;
 
-                        // Semestr: styczeń-czerwiec = 2, wrzesień-grudzień = 1
                         let semester = 1;
                         if (gradeDate) {
                             const month = parseInt(gradeDate.split('-')[1]);
@@ -176,15 +144,12 @@ async function getGrades(client) {
         console.error("HTML Scraping failed:", err.message);
     }
 
-    // Sklejamy wszystkie tablice w jedną listę wszystkich wpisów.
     const allGrades = [...standardGrades, ...pointGrades, ...extraHtmlPointGrades];
 
-    // Usuwamy duplikaty systemowe (żeby HTML scraper nie powielał tego samego co REST)
     const uniqueGrades = [];
     const gradeIds = new Set();
 
     allGrades.forEach(g => {
-        // Identyfikator w postaci klucza z przedmiotu i nazwy - system dba o duble
         const uniqStr = `${g.subject}-${g.grade}-${g.category}`;
         if (!gradeIds.has(uniqStr)) {
             uniqueGrades.push(g);
@@ -203,14 +168,8 @@ async function getGrades(client) {
 
 /**
  * Pobiera i przetwarza frekwencję.
- * 
- * Pobiera równolegle: /Attendances, /Attendances/Types
- * Łączy typy nieobecności z ich nazwami.
- * 
- * @param {import("axios").AxiosInstance} client
- * @returns {Promise<Object>} Podsumowanie frekwencji
  */
-async function getAttendance(client) {
+export async function getAttendance(client) {
     const [attendancesData, typesData, subjectsData, lessonsData] = await Promise.all([
         fetchResource(client, "/Attendances"),
         fetchResource(client, "/Attendances/Types"),
@@ -225,7 +184,6 @@ async function getAttendance(client) {
     const typeMap = buildIdMap(typesData?.Types || []);
     const subjectMap = buildIdMap(subjectsData?.Subjects || []);
 
-    // Mapowanie relacji Lekcja -> Przedmiot 
     const lessonMap = {};
     (lessonsData?.Lessons || []).forEach(l => {
         if (l.Id && l.Subject?.Id) {
@@ -237,12 +195,9 @@ async function getAttendance(client) {
 
     const records = attendancesData.Attendances.map((a) => {
         const typeName = typeMap[a.Type?.Id] || "Nieznany";
-
-        // Wyciąganie Id Przedmiotu
         const subjectId = (a.Lesson?.Id ? lessonMap[a.Lesson.Id] : null) || a.Subject?.Id;
         const subjectName = subjectId ? (subjectMap[subjectId] || "Nieznany") : "Inne";
 
-        // Zlicz per typ
         summary[typeName] = (summary[typeName] || 0) + 1;
 
         return {
@@ -261,14 +216,8 @@ async function getAttendance(client) {
 
 /**
  * Pobiera plan lekcji z uwzględnieniem danego tygodnia i mapuje sale/nauczycieli.
- * 
- * Zamiast zawodnego scrapowania HTML, używa API /Timetables?weekStart= i /Classrooms
- * 
- * @param {import("axios").AxiosInstance} client - pełny klient z cookies Librusa
- * @param {string} [weekStart] - opcjonalna data rozpoczęcia tygodnia YYYY-MM-DD
- * @returns {Promise<Object>} { "2026-03-02": [{lessonNo, time, subject, teacher, room}] }
  */
-async function getTimetable(client, weekStart) {
+export async function getTimetable(client, weekStart) {
     const timetableUrl = weekStart ? `/Timetables?weekStart=${weekStart}` : "/Timetables";
 
     const [timetableData, classroomsData] = await Promise.all([
@@ -278,32 +227,27 @@ async function getTimetable(client, weekStart) {
 
     if (!timetableData?.Timetable) return null;
 
-    // Mapa ID -> Nazwa sali (np. "210")
     const classroomMap = buildIdMap(classroomsData?.Classrooms || []);
-
     const result = {};
 
-    // API zwraca { "YYYY-MM-DD": [ [ {Lesson}, {Lesson} ], [ {Lesson} ] ] }
     for (const [dateKey, daySlots] of Object.entries(timetableData.Timetable)) {
         result[dateKey] = [];
-
         if (!Array.isArray(daySlots)) continue;
 
         for (const slotGroup of daySlots) {
             if (!Array.isArray(slotGroup) || slotGroup.length === 0) continue;
 
             for (const lesson of slotGroup) {
-                if (!lesson.Subject) continue; // Pusta lekcja
+                if (!lesson.Subject) continue;
 
                 const teacherName = lesson.Teacher
                     ? `${lesson.Teacher.FirstName || ''} ${lesson.Teacher.LastName || ''}`.trim()
                     : '';
 
-                // Klasy w API czasami mają prefix s. 
                 let roomName = '';
                 if (lesson.Classroom?.Id) {
                     const rawRoom = classroomMap[lesson.Classroom.Id] || lesson.Classroom.Id;
-                    roomName = `s. ${rawRoom}`; // frontend expects "s. 210"
+                    roomName = `s. ${rawRoom}`;
                 }
 
                 result[dateKey].push({
@@ -319,7 +263,6 @@ async function getTimetable(client, weekStart) {
         }
     }
 
-    // Sortowanie po numerze lekcji w każdy dzień
     for (const dateKey of Object.keys(result)) {
         result[dateKey].sort((a, b) => parseInt(a.lessonNo) - parseInt(b.lessonNo));
     }
@@ -329,31 +272,16 @@ async function getTimetable(client, weekStart) {
 
 /**
  * Pobiera szczęśliwy numer z Librusa.
- * 
- * @param {import("axios").AxiosInstance} client
- * @returns {Promise<number|null>}
  */
-async function getLuckyNumber(client) {
+export async function getLuckyNumber(client) {
     const data = await fetchResource(client, "/LuckyNumbers");
     return data?.LuckyNumber?.LuckyNumber ?? null;
 }
 
 /**
  * Pobiera informacje o zalogowanym użytkowniku.
- * 
- * @param {import("axios").AxiosInstance} client
- * @returns {Promise<Object|null>}
  */
-async function getMe(client) {
+export async function getMe(client) {
     const data = await fetchResource(client, "/Me");
     return data?.Me || null;
 }
-
-module.exports = {
-    getGrades,
-    getAttendance,
-    getTimetable,
-    getLuckyNumber,
-    getMe,
-    fetchResource, // eksportujemy żeby można było dodawać nowe endpointy bez modyfikacji tego pliku
-};
