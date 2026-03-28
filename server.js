@@ -59,6 +59,17 @@ app.get("/debug-gateway", async (_req, res) => {
 });
 
 /**
+ * Generuje nagłówek x-baner identyczny do tego, który przesyła przeglądarka
+ * przez api.librus.pl/OAuth/js/Authorization.js (anti-bot check serwera).
+ * Algorytm: każdy znak w stringu jest przesuwany o +20 w ASCII.
+ *   x-baner = encode(Math.random()) + "_" + encode(Date.now())
+ */
+function generateXBaner() {
+    const encode = (str) => str.split("").map(c => String.fromCharCode(c.charCodeAt(0) + 20)).join("");
+    return encode(Math.random().toString()) + "_" + encode(Date.now().toString());
+}
+
+/**
  * POST /debug-auth
  * Pełny trace OAuth flow krok po kroku z logiem co każdy krok zwrócił.
  * Body: { login, pass }
@@ -94,7 +105,11 @@ app.post("/debug-auth", async (req, res) => {
         form.append("login", login);
         form.append("pass", pass);
         const r2 = await client.post(`${OAUTH_BASE}/OAuth/Authorization?client_id=46`, form.toString(), {
-            headers: { "Content-Type": "application/x-www-form-urlencoded", "Referer": `${OAUTH_BASE}/OAuth/Authorization?client_id=46&response_type=code&scope=mydata` }
+            headers: {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Referer": `${OAUTH_BASE}/OAuth/Authorization?client_id=46&response_type=code&scope=mydata`,
+                "x-baner": generateXBaner(),
+            }
         });
         trace.step2 = { status: r2.status, data: r2.data, cookiesForApi: (await jar.getCookies("https://api.librus.pl")).map(c => c.key) };
 

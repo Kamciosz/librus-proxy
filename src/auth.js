@@ -8,6 +8,16 @@ export const OAUTH_BASE = "https://api.librus.pl";
 export const GATEWAY_BASE = "https://synergia.librus.pl/gateway/api/2.0";
 
 /**
+ * Generuje nagłówek x-baner identyczny do tego, który przesyła przeglądarka
+ * przez api.librus.pl/OAuth/js/Authorization.js (anti-bot check serwera).
+ * Bez tego nagłówka serwer zwraca goTo="/2FA" zamiast "/Grant".
+ */
+function generateXBaner() {
+    const encode = (str) => str.split("").map(c => String.fromCharCode(c.charCodeAt(0) + 20)).join("");
+    return encode(Math.random().toString()) + "_" + encode(Date.now().toString());
+}
+
+/**
  * Loguje użytkownika do Librus i aktywuje dostęp do REST API.
  * 
  * @param {import("axios").AxiosInstance} client - Axios client z CookieJar
@@ -34,6 +44,7 @@ export async function authenticate(client, login, pass) {
             headers: {
                 "Referer": `${OAUTH_BASE}/OAuth/Authorization?client_id=46&response_type=code&scope=mydata`,
                 "Content-Type": "application/x-www-form-urlencoded",
+                "x-baner": generateXBaner(),
             },
         }
     );
