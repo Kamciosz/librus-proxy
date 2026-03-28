@@ -48,15 +48,28 @@ export async function authenticate(client, login, pass) {
         throw new Error("INVALID_CREDENTIALS");
     }
 
-    // KROK 3: Aktywuj sesję przez Grant endpoint
-    await client.get(
-        `${OAUTH_BASE}/OAuth/Authorization/Grant?client_id=46`,
-        {
-            headers: {
-                "Referer": `${OAUTH_BASE}/OAuth/Authorization?client_id=46`,
-            },
-        }
-    );
+    // KROK 3: Aktywuj sesję przez 2FA/Grant endpoint
+    // loginResponse.data.goTo zawiera właściwy URL (może być /2FA lub /Grant zależnie od konta)
+    const grantPath = responseData?.goTo || "/OAuth/Authorization/Grant?client_id=46";
+    const grantUrl = grantPath.startsWith("http") ? grantPath : `${OAUTH_BASE}${grantPath}`;
+
+    await client.get(grantUrl, {
+        headers: {
+            "Referer": `${OAUTH_BASE}/OAuth/Authorization?client_id=46`,
+        },
+    });
+
+    // KROK 3.5: Przejdź przez portal.librus.pl/rodzina/synergia/loguj
+    // Ten krok był w oryginalnej wersji Playwright i jest WYMAGANY.
+    // Redirect chain z tego URL (przy aktywnej sesji portalu) przechodzi przez
+    // synergia.librus.pl i ustawia uwierzytelniony DZIENNIKSID dla gateway.
+    // Bez tego kroku DZIENNIKSID na synergia.librus.pl pozostaje anonimowy (A43~...)
+    // i TokenInfo zwraca HTTP 401.
+    await client.get("https://portal.librus.pl/rodzina/synergia/loguj", {
+        headers: {
+            "Referer": "https://portal.librus.pl/",
+        },
+    });
 
     // KROK 4 + 5: Aktywuj dostęp do REST gateway API
     let tokenInfo;
