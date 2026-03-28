@@ -115,6 +115,18 @@ app.post("/debug-auth", async (req, res) => {
             bodyPreview: typeof r3.data === "string" ? r3.data.substring(0, 300) : JSON.stringify(r3.data).substring(0, 300),
         };
 
+        // KROK 3.5 - portal.librus.pl/rodzina/synergia/loguj (nowy krok testowy)
+        const r35 = await client.get("https://portal.librus.pl/rodzina/synergia/loguj", {
+            headers: { "Referer": "https://portal.librus.pl/" },
+        });
+        trace.step35_portal = {
+            status: r35.status,
+            finalUrl: r35.request?.res?.responseUrl,
+            cookiesForSynergia: (await jar.getCookies("https://synergia.librus.pl")).map(c => `${c.key}=${c.value.substring(0, 10)}...`),
+            cookiesForPortal: (await jar.getCookies("https://portal.librus.pl")).map(c => c.key),
+            bodyPreview: typeof r35.data === "string" ? r35.data.substring(0, 500) : JSON.stringify(r35.data).substring(0, 300),
+        };
+
         // Krok 4 - TokenInfo
         const r4 = await client.get(`${GATEWAY_BASE}/Auth/TokenInfo`, { timeout: 10000 });
         trace.step4_tokenInfo = {
