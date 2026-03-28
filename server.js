@@ -102,9 +102,27 @@ app.post("/debug-auth", async (req, res) => {
             return res.json({ ...trace, conclusion: "INVALID_CREDENTIALS" });
         }
 
-        // Krok 3 - Grant (używamy goTo z loginResponse jeśli istnieje!)
+        // Krok 3 - Grant/2FA (bez śledzenia redirectu — chcemy zobaczyć Location)
         const grantUrl = r2.data?.goTo ? (r2.data.goTo.startsWith("http") ? r2.data.goTo : `${OAUTH_BASE}${r2.data.goTo}`) : `${OAUTH_BASE}/OAuth/Authorization/Grant?client_id=46`;
         trace.grantUrl = grantUrl;
+        
+        // Najpierw BEZ redirect - żeby zobaczyć Location header z OAuth code
+        const clientNoRedirect = wrapper(axios.create({
+            jar,
+            timeout: 15000,
+            maxRedirects: 0,
+            headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", "Accept-Encoding": "identity" },
+            validateStatus: () => true,
+        }));
+        const r3raw = await clientNoRedirect.get(grantUrl, { headers: { "Referer": `${OAUTH_BASE}/OAuth/Authorization?client_id=46` } });
+        trace.step3_raw = {
+            status: r3raw.status,
+            locationHeader: r3raw.headers?.location,
+            allHeaders: Object.fromEntries(Object.entries(r3raw.headers || {}).filter(([k]) => ['location','set-cookie','content-type'].includes(k))),
+            bodyPreview: typeof r3raw.data === "string" ? r3raw.data.substring(0, 400) : JSON.stringify(r3raw.data).substring(0, 200),
+        };
+
+        // Teraz śledzimy redirect normalnie
         const r3 = await client.get(grantUrl, { headers: { "Referer": `${OAUTH_BASE}/OAuth/Authorization?client_id=46` } });
         trace.step3 = {
             status: r3.status,
@@ -112,7 +130,6 @@ app.post("/debug-auth", async (req, res) => {
             cookiesForApi: (await jar.getCookies("https://api.librus.pl")).map(c => c.key),
             cookiesForSynergia: (await jar.getCookies("https://synergia.librus.pl")).map(c => `${c.key}=${c.value.substring(0, 10)}...`),
             cookiesForPortal: (await jar.getCookies("https://portal.librus.pl")).map(c => c.key),
-            bodyPreview: typeof r3.data === "string" ? r3.data.substring(0, 300) : JSON.stringify(r3.data).substring(0, 300),
         };
 
         // KROK 3.5 - portal.librus.pl/rodzina/synergia/loguj (nowy krok testowy)
