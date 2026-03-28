@@ -42,6 +42,9 @@ router.post("/", async (req, res) => {
         if (err.message === "INVALID_CREDENTIALS") {
             return res.status(401).json({ error: "Nieprawidłowy login lub hasło Librusa." });
         }
+        if (err.message === "AUTH_FAILED") {
+            return res.status(401).json({ error: "Błąd aktywacji API Librusa. Sprawdź dane lub spróbuj ponownie." });
+        }
         console.error("[Route /librus] Auth error:", err.message);
         return res.status(500).json({ error: "Błąd uwierzytelniania: " + err.message });
     }

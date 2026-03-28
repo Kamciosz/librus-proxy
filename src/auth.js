@@ -59,19 +59,28 @@ export async function authenticate(client, login, pass) {
     );
 
     // KROK 4 + 5: Aktywuj dostęp do REST gateway API
-    const tokenInfo = await client.get(`${GATEWAY_BASE}/Auth/TokenInfo`, {
-        timeout: 10000,
-    });
+    let tokenInfo;
+    try {
+        tokenInfo = await client.get(`${GATEWAY_BASE}/Auth/TokenInfo`, {
+            timeout: 10000,
+        });
+    } catch (err) {
+        console.error("[Auth] TokenInfo request failed:", err.message, "status:", err.response?.status);
+        throw new Error("AUTH_FAILED");
+    }
+
+    console.log("[Auth] TokenInfo response status:", tokenInfo.status, "data:", JSON.stringify(tokenInfo.data));
 
     const userIdentifier = tokenInfo.data?.UserIdentifier;
     if (!userIdentifier) {
-        console.warn("[Auth] TokenInfo nie zwrócił UserIdentifier - API może działać bez aktywacji");
-        return true;
+        console.error("[Auth] TokenInfo nie zwrócił UserIdentifier. Dane:", JSON.stringify(tokenInfo.data));
+        throw new Error("AUTH_FAILED");
     }
 
     await client.get(`${GATEWAY_BASE}/Auth/UserInfo/${userIdentifier}`, {
         timeout: 10000,
     });
 
+    console.log("[Auth] Aktywacja gateway zakończona pomyślnie dla:", userIdentifier);
     return true;
 }

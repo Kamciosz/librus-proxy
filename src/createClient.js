@@ -21,26 +21,23 @@ export function createClient() {
         };
     }
 
-    // Instancja got-scraping z automatycznym zarządzaniem nagłówkami i TLS
+    // Instancja got-scraping z automatycznym zarządzaniem nagłówkami i TLS.
+    // WAŻNE: useHeaderGenerator: false — wyłącza losowe nagłówki per-request.
+    // Losowe User-Agent/sec-fetch-* między requestami psuły sesję OAuth Librusa
+    // (serwer śledzi nagłówki i odrzucał żądania z niespójnym fingerprint).
     const instance = gotScraping.extend({
         cookieJar,
         timeout: { request: 60000 }, // 60s timeout
-        retry: { limit: 2 },
-        agent, 
+        retry: { limit: 0 },         // bez retry — OAuth flow jest stanowy
+        agent,
+        useHeaderGenerator: false,   // stałe nagłówki przez całą sesję
         headers: {
-            // Referer jest wymagany przez Librus
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/html, */*",
+            "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Accept-Encoding": "identity",
             "Referer": "https://portal.librus.pl/rodzina/synergia/loguj",
         },
-        // Konfiguracja generatora nagłówków (udajemy Chrome/Firefox na Desktopie)
-        headerGeneratorOptions: {
-            browsers: [
-                { name: 'chrome', minVersion: 110 },
-                { name: 'firefox', minVersion: 110 }
-            ],
-            devices: ['desktop'],
-            locales: ['pl-PL', 'en-US'],
-            operatingSystems: ['windows', 'linux']
-        }
     });
 
     // Wrapper, który udaje API Axios'a (get, post) dla kompatybilności z resztą kodu
