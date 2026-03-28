@@ -154,6 +154,42 @@ app.post("/debug-auth", async (req, res) => {
             finalOauthCode = codeMatch ? decodeURIComponent(codeMatch[1]) : null;
             finalSynergiaUrl = grantLoc;
             trace.step4_grant = { status: r4grant.status, locationHeader: grantLoc.substring(0, 80), codeFound: !!finalOauthCode };
+        } else if (gotoLocation.includes("PerformLogin")) {
+            // Przypadek C: /2FA → /PerformLogin → ???
+            const performUrl = gotoLocation.startsWith("http") ? gotoLocation : `${OAUTH_BASE}${gotoLocation}`;
+            const r4perf = await clientNoRedir.get(performUrl, { headers: { "Referer": goToUrl } });
+            const perfLoc = r4perf.headers?.location || "";
+            const perfBody = typeof r4perf.data === "string" ? r4perf.data.substring(0, 300) : JSON.stringify(r4perf.data).substring(0, 300);
+            trace.step4_performLogin = { status: r4perf.status, locationHeader: perfLoc, bodyPreview: perfBody };
+
+            // Jeśli PerformLogin → /Grant
+            if (perfLoc.includes("/Grant")) {
+                const grantUrl = perfLoc.startsWith("http") ? perfLoc : `${OAUTH_BASE}${perfLoc}`;
+                const r5grant = await clientNoRedir.get(grantUrl, { headers: { "Referer": performUrl } });
+                const grantLoc = r5grant.headers?.location || "";
+                const codeMatch = grantLoc.match(/[?&]code=([^&]+)/);
+                finalOauthCode = codeMatch ? decodeURIComponent(codeMatch[1]) : null;
+                finalSynergiaUrl = grantLoc;
+                trace.step5_grant = { status: r5grant.status, locationHeader: grantLoc.substring(0, 80), codeFound: !!finalOauthCode };
+            } else if (perfLoc.includes("code=")) {
+                const codeMatch = perfLoc.match(/[?&]code=([^&]+)/);
+                finalOauthCode = codeMatch ? decodeURIComponent(codeMatch[1]) : null;
+                finalSynergiaUrl = perfLoc;
+                trace.step5_directCode = { locationHeader: perfLoc.substring(0, 80), codeFound: !!finalOauthCode };
+            } else if (perfLoc) {
+                // Śledzimy dalej co kolwiek to jest
+                const nextUrl = perfLoc.startsWith("http") ? perfLoc : `${OAUTH_BASE}${perfLoc}`;
+                const r5next = await clientNoRedir.get(nextUrl, { headers: { "Referer": performUrl } });
+                const nextLoc = r5next.headers?.location || "";
+                trace.step5_next = { url: nextUrl, status: r5next.status, locationHeader: nextLoc.substring(0, 100) };
+                if (nextLoc.includes("code=")) {
+                    const codeMatch = nextLoc.match(/[?&]code=([^&]+)/);
+                    finalOauthCode = codeMatch ? decodeURIComponent(codeMatch[1]) : null;
+                    finalSynergiaUrl = nextLoc;
+                }
+            } else if (r4perf.status === 200) {
+                trace.step4_performLogin.note = "PerformLogin zwraca 200 HTML";
+            }
         } else if (gotoLocation.includes("code=")) {
             // Przypadek B: /2FA daje bezpośrednio kod OAuth
             const codeMatch = gotoLocation.match(/[?&]code=([^&]+)/);
